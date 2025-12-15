@@ -8,14 +8,7 @@
     mc:Ignorable="d">
 
     <Grid x:Name="RootGrid" Background="Black">
-
-        <SplitView x:Name="MainSplitView"
-                   DisplayMode="Overlay"
-                   OpenPaneLength="320"
-                   IsPaneOpen="True"
-                   PanePlacement="Right" 
-                   PaneBackground="#1E1E1E">
-
+        <SplitView x:Name="MainSplitView" DisplayMode="Overlay" OpenPaneLength="320" IsPaneOpen="True" PanePlacement="Right" PaneBackground="#1E1E1E">
             <SplitView.Pane>
                 <Border Padding="24" BorderBrush="#2C2C2C" BorderThickness="1,0,0,0">
                     <Grid>
@@ -28,14 +21,11 @@
                             <StackPanel>
                                 <TextBlock Text="Connection" Foreground="White" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,16"/>
 
-                                <ToggleButton x:Name="ConnectToggle"
-                                              Height="44"
-                                              FontSize="16"
-                                              FontWeight="SemiBold"
-                                              Content="Start"
-                                              HorizontalAlignment="Stretch"
-                                              Margin="0,0,0,16"
-                                              Click="ConnectToggle_Click"/>
+                                <ToggleButton x:Name="ConnectToggle" Height="44" FontSize="16" FontWeight="SemiBold" Content="Start" HorizontalAlignment="Stretch" Margin="0,0,0,16" Click="ConnectToggle_Click"/>
+
+                                <ToggleSwitch x:Name="ControlsOnlyToggle" Header="Controls Only Mode" IsOn="False" Foreground="White" Margin="0,0,0,16" Toggled="ControlsOnlyToggle_Toggled"/>
+
+                                <ToggleSwitch x:Name="UhidMouseToggle" Header="Enable Mouse (UHID)" IsOn="False" IsEnabled="False" Foreground="White" Margin="0,-8,0,16" ToolTipService.ToolTip="Shows a visible mouse cursor on the device. Only for Controls Only mode."/>
 
                                 <Button x:Name="FullScreenButton" Content="Fullscreen" Height="42" FontSize="15" HorizontalAlignment="Stretch" Click="FullScreenButton_Click"/>
 
@@ -50,10 +40,8 @@
                                 <TextBlock Text="Max Height" Foreground="#BBBBBB" FontSize="13" Margin="0,0,0,4"/>
                                 <TextBox x:Name="maxSizeBox" Height="36" Text="720" Margin="0,0,0,12"/>
 
-
                                 <TextBlock Text="Bitrate (Mbps)" Foreground="#BBBBBB" FontSize="13" Margin="0,0,0,4"/>
                                 <TextBox x:Name="BitRateBox" Height="36" Text="4" Margin="0,0,0,12"/>
-
 
                                 <Rectangle Height="1" Fill="#2C2C2C" Margin="0,0,0,16"/>
 
@@ -63,42 +51,52 @@
                                 </ScrollViewer>
                             </StackPanel>
                         </ScrollViewer>
-
                     </Grid>
                 </Border>
             </SplitView.Pane>
 
             <SplitView.Content>
                 <Grid x:Name="ContentGrid" Background="Black">
-
                     <Grid x:Name="VideoContainer" Background="Black">
-                        
                         <Viewbox Stretch="Uniform">
-
-                            <Grid x:Name="VideoSurface"
-                                  Background="Transparent"
-                                  PointerPressed="VideoSurface_PointerPressed"
-                                  PointerMoved="VideoSurface_PointerMoved"
-                                  PointerReleased="VideoSurface_PointerReleased"
-                                  PointerCanceled="VideoSurface_PointerReleased"
-                                  PointerExited="VideoSurface_PointerReleased">
-                            </Grid>
+                            <Grid x:Name="VideoSurface" Background="Transparent" PointerPressed="VideoSurface_PointerPressed" PointerMoved="VideoSurface_PointerMoved" PointerReleased="VideoSurface_PointerReleased" PointerCanceled="VideoSurface_PointerReleased" PointerExited="VideoSurface_PointerReleased" />
                         </Viewbox>
                     </Grid>
 
+                    <Grid x:Name="MouseControlContainer" Background="Black" Visibility="Collapsed">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="80" />
+                        </Grid.RowDefinitions>
+
+                        <Grid x:Name="MousePadArea" Grid.Row="0" Background="#111111"
+                              PointerPressed="MousePadArea_PointerPressed"
+                              PointerMoved="MousePadArea_PointerMoved"
+                              PointerReleased="MousePadArea_PointerReleased"
+                              PointerCanceled="MousePadArea_PointerReleased"
+                              PointerExited="MousePadArea_PointerReleased" />
+
+                        <Grid Grid.Row="1" Background="#000000">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border x:Name="LeftClickArea" Grid.Column="0" Background="#222222" BorderBrush="#333333" BorderThickness="0,1,1,0"
+                                    PointerPressed="LeftClickArea_PointerPressed"
+                                    PointerReleased="LeftClickArea_PointerReleased" />
+                            <Border x:Name="RightClickArea" Grid.Column="1" Background="#222222" BorderBrush="#333333" BorderThickness="0,1,0,0"
+                                    PointerPressed="RightClickArea_PointerPressed"
+                                    PointerReleased="RightClickArea_PointerReleased" />
+                        </Grid>
+                    </Grid>
+
                     <StackPanel VerticalAlignment="Top" HorizontalAlignment="Right" Orientation="Horizontal" Margin="0,10,10,0">
-                        <Button x:Name="HamburgerButton"
-                            Background="#99000000"
-                            Foreground="White"
-                            BorderThickness="0"
-                            Width="48" Height="48"
-                            Click="HamburgerButton_Click">
+                        <Button x:Name="HamburgerButton" Background="#99000000" Foreground="White" BorderThickness="0" Width="48" Height="48" Click="HamburgerButton_Click">
                             <Button.Content>
                                 <FontIcon Glyph="&#xE700;" FontFamily="Segoe MDL2 Assets"/>
                             </Button.Content>
                         </Button>
                     </StackPanel>
-
                 </Grid>
             </SplitView.Content>
         </SplitView>
