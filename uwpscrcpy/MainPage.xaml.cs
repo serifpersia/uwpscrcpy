@@ -22,29 +22,25 @@ namespace uwpscrcpy
     public sealed partial class MainPage : Page
     {
         private const bool ENABLE_DEBUG_LOGGING = false;
-
         private const int POOL_BUFFER_SIZE = 512 * 1024;
         private const int MAX_QUEUED_FRAMES = 15;
 
-        private readonly TimeSpan PLAYER_BUFFER_TIME = TimeSpan.FromMilliseconds(0);
+        private readonly TimeSpan PLAYER_BUFFER_TIME = TimeSpan.FromMilliseconds(150);
 
         private ScrcpySession _session;
         private CancellationTokenSource _cts;
         private MediaPlayer _mediaPlayer;
         private MediaPlayerElement _currentVideoElement;
         private MediaStreamSource _mss;
-
         private readonly ConcurrentQueue<MediaStreamSample> _sampleQueue = new ConcurrentQueue<MediaStreamSample>();
         private readonly SemaphoreSlim _signal = new SemaphoreSlim(0);
-
         private byte[] _cachedConfigData = null;
         private long _baselinePts = -1;
         private bool _waitingForKeyFrame = true;
-
         private readonly byte[] _headerBuffer = new byte[12];
         private readonly ConcurrentStack<byte[]> _frameDataPool = new ConcurrentStack<byte[]>();
-
         private readonly DisplayRequest _displayRequest = new DisplayRequest();
+
         private bool _isUhidMouseMode = false;
         private bool _isLeftMouseButtonDown = false;
         private const byte MOUSE_BUTTON_LEFT = 1 << 0;
@@ -53,8 +49,15 @@ namespace uwpscrcpy
         private bool _isDragging = false;
         private long _lastTapTimestamp = 0;
         private const int DOUBLE_TAP_THRESHOLD_MS = 200;
+
         private double _scrollAccumulatorY = 0;
         private const double SCROLL_SENSITIVITY = 0.025;
+
+        private long _lastTouchSendTime = 0;
+        private const int TOUCH_RATE_LIMIT_MS = 33;
+
+        private double _pendingMouseX = 0;
+        private double _pendingMouseY = 0;
 
         public MainPage()
         {
@@ -125,7 +128,6 @@ namespace uwpscrcpy
         private void Log(string msg)
         {
             if (!ENABLE_DEBUG_LOGGING && msg.StartsWith("[DEBUG]")) return;
-
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, () =>
             {
                 if (LogBlock.Text.Length > 500) LogBlock.Text = LogBlock.Text.Substring(0, 250);
@@ -160,7 +162,6 @@ namespace uwpscrcpy
                     {
                         RealTimePlayback = true,
                         AutoPlay = true,
-
                         AudioCategory = MediaPlayerAudioCategory.Communications
                     };
                 }
@@ -202,6 +203,8 @@ namespace uwpscrcpy
             _lastTapTimestamp = 0;
             _pointerPositions.Clear();
             _scrollAccumulatorY = 0;
+            _pendingMouseX = 0;
+            _pendingMouseY = 0;
             _waitingForKeyFrame = true;
 
             MouseControlContainer.Visibility = Visibility.Collapsed;
@@ -328,7 +331,6 @@ namespace uwpscrcpy
                         var sample = MediaStreamSample.CreateFromBuffer(
                             decoderBuffer.AsBuffer(0, totalSize),
                             TimeSpan.FromTicks(relativeUs * 10));
-
                         sample.KeyFrame = isKey;
                         sample.Processed += (s, e) => ReturnFrameBuffer(decoderBuffer);
 
@@ -366,7 +368,6 @@ namespace uwpscrcpy
         private void InitVideoPlayer(byte[] codecPrivateData)
         {
             if (_mss != null) return;
-
             VideoSurface.Width = _session.Width;
             VideoSurface.Height = _session.Height;
 
@@ -386,7 +387,6 @@ namespace uwpscrcpy
                 CanSeek = false
             };
             _mss.SampleRequested += OnSampleRequested;
-
             _mediaPlayer.Source = MediaSource.CreateFromMediaStreamSource(_mss);
         }
 
@@ -416,8 +416,16 @@ namespace uwpscrcpy
         private void VideoSurface_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
             if (_isUhidMouseMode) return;
+
             if (e.Pointer.IsInContact)
-                _session?.SendTouch(2, e, VideoSurface);
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (now - _lastTouchSendTime >= TOUCH_RATE_LIMIT_MS)
+                {
+                    _session?.SendTouch(2, e, VideoSurface);
+                    _lastTouchSendTime = now;
+                }
+            }
         }
 
         private void VideoSurface_PointerReleased(object sender, PointerRoutedEventArgs e)
@@ -456,7 +464,6 @@ namespace uwpscrcpy
         {
             uint ptrId = e.Pointer.PointerId;
             var pos = e.GetCurrentPoint(MousePadArea).Position;
-
             if (!_pointerPositions.ContainsKey(ptrId))
                 _pointerPositions.Add(ptrId, pos);
             else
@@ -492,25 +499,39 @@ namespace uwpscrcpy
             }
 
             double MOUSE_SENSITIVITY = 1.25;
-            var delta = new Point(
-                (currentPosition.X - previousPosition.X) * MOUSE_SENSITIVITY,
-                (currentPosition.Y - previousPosition.Y) * MOUSE_SENSITIVITY
-            );
+
+            double rawDX = (currentPosition.X - previousPosition.X) * MOUSE_SENSITIVITY;
+            double rawDY = (currentPosition.Y - previousPosition.Y) * MOUSE_SENSITIVITY;
 
             _pointerPositions[ptrId] = currentPosition;
 
             if (_pointerPositions.Count == 1)
             {
+                _pendingMouseX += rawDX;
+                _pendingMouseY += rawDY;
+
                 byte buttons = 0;
                 if (_isDragging || _isLeftMouseButtonDown)
                     buttons |= MOUSE_BUTTON_LEFT;
 
-                _session?.SendHidInputEvent(buttons, delta);
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (now - _lastTouchSendTime >= TOUCH_RATE_LIMIT_MS)
+                {
+                    if (Math.Abs(_pendingMouseX) >= 1.0 || Math.Abs(_pendingMouseY) >= 1.0)
+                    {
+                        var deltaToSend = new Point(_pendingMouseX, _pendingMouseY);
+                        _session?.SendHidInputEvent(buttons, deltaToSend);
+
+                        _pendingMouseX = 0;
+                        _pendingMouseY = 0;
+                        _lastTouchSendTime = now;
+                    }
+                }
             }
             else if (_pointerPositions.Count >= 2)
             {
-                double rawDeltaY = delta.Y * SCROLL_SENSITIVITY;
-                if (Math.Abs(delta.Y) < 0.5) rawDeltaY = 0;
+                double rawDeltaY = rawDY * SCROLL_SENSITIVITY;
+                if (Math.Abs(rawDY) < 0.5) rawDeltaY = 0;
 
                 _scrollAccumulatorY += rawDeltaY;
 
@@ -546,6 +567,9 @@ namespace uwpscrcpy
         {
             if (_pointerPositions.ContainsKey(ptrId))
                 _pointerPositions.Remove(ptrId);
+
+            _pendingMouseX = 0;
+            _pendingMouseY = 0;
 
             if (_isDragging && _pointerPositions.Count == 0)
             {

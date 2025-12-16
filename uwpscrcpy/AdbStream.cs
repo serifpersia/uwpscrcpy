@@ -21,7 +21,6 @@ namespace uwpscrcpy
         private readonly SemaphoreSlim _readSignal = new SemaphoreSlim(0);
         private readonly object _queueLock = new object();
         private readonly SemaphoreSlim _writeAckLatch = new SemaphoreSlim(1, 1);
-
         private PooledChunk _currentChunk;
         private int _currentChunkOffset;
         private bool _isClosed;
@@ -68,7 +67,6 @@ namespace uwpscrcpy
                 {
                     int toCopy = Math.Min(count, available);
                     Buffer.BlockCopy(_currentChunk.Buffer, _currentChunkOffset, buffer, offset, toCopy);
-
                     _currentChunkOffset += toCopy;
                     if (_currentChunkOffset >= _currentChunk.Length)
                     {
@@ -96,7 +94,6 @@ namespace uwpscrcpy
             }
 
             int totalCopied = 0;
-
             while (count > 0)
             {
                 if (_currentChunk.Buffer == null)
@@ -119,9 +116,7 @@ namespace uwpscrcpy
 
                 int available = _currentChunk.Length - _currentChunkOffset;
                 int toCopy = Math.Min(count, available);
-
                 Buffer.BlockCopy(_currentChunk.Buffer, _currentChunkOffset, buffer, offset, toCopy);
-
                 _currentChunkOffset += toCopy;
                 offset += toCopy;
                 count -= toCopy;
@@ -143,14 +138,22 @@ namespace uwpscrcpy
             return ReadAsync(buffer, offset, count, CancellationToken.None).GetAwaiter().GetResult();
         }
 
-        public override void Write(byte[] buffer, int offset, int count)
+        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         {
             if (_isClosed) return;
-            _writeAckLatch.Wait();
+
+            await _writeAckLatch.WaitAsync(cancellationToken);
+
             if (_isClosed) return;
+
             byte[] payload = new byte[count];
             Buffer.BlockCopy(buffer, offset, payload, 0, count);
             _client.SendPacket(AdbProtocol.A_WRTE, _localId, _remoteId, payload);
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            WriteAsync(buffer, offset, count, CancellationToken.None).Wait();
         }
 
         public override bool CanRead => true;
@@ -169,13 +172,11 @@ namespace uwpscrcpy
                 _client.SendPacket(AdbProtocol.A_CLSE, _localId, _remoteId, null);
                 SignalClose();
             }
-
             if (_currentChunk.Buffer != null)
             {
                 SimpleBufferPool.Return(_currentChunk.Buffer);
                 _currentChunk.Buffer = null;
             }
-
             lock (_queueLock)
             {
                 while (_chunkQueue.Count > 0)
