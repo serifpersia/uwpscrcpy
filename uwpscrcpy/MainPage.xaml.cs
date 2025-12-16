@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
@@ -40,13 +41,18 @@ namespace uwpscrcpy
 
         private bool _isUhidMouseMode = false;
         private bool _isLeftMouseButtonDown = false;
-        private Point _lastMousePosition;
         private const byte MOUSE_BUTTON_LEFT = 1 << 0;
         private const byte MOUSE_BUTTON_RIGHT = 1 << 1;
 
+        private Dictionary<uint, Point> _pointerPositions = new Dictionary<uint, Point>();
+
         private bool _isDragging = false;
         private long _lastTapTimestamp = 0;
-        private const int DOUBLE_TAP_THRESHOLD_MS = 300;
+        private const int DOUBLE_TAP_THRESHOLD_MS = 200;
+
+        private double _scrollAccumulatorY = 0;
+        private const double SCROLL_SENSITIVITY = 0.025;
+        private const double SCROLL_DEADZONE = 0.75;
 
         public MainPage()
         {
@@ -94,6 +100,7 @@ namespace uwpscrcpy
             maxSizeBox.IsEnabled = enabled;
             ControlsOnlyToggle.IsEnabled = enabled;
             UhidMouseToggle.IsEnabled = enabled && ControlsOnlyToggle.IsOn;
+            InvertScrollToggle.IsEnabled = enabled && UhidMouseToggle.IsOn;
         }
 
         private void Log(string msg)
@@ -160,6 +167,10 @@ namespace uwpscrcpy
             _isLeftMouseButtonDown = false;
             _isDragging = false;
             _lastTapTimestamp = 0;
+
+            _pointerPositions.Clear();
+            _scrollAccumulatorY = 0;
+
             MouseControlContainer.Visibility = Visibility.Collapsed;
             VideoContainer.Visibility = Visibility.Visible;
 
@@ -196,10 +207,7 @@ namespace uwpscrcpy
             try
             {
                 var stream = _session.VideoStream;
-                if (stream == null)
-                {
-                    return;
-                }
+                if (stream == null) return;
                 while (!token.IsCancellationRequested)
                 {
                     if (!await ReadExactToBufferAsync(stream, _headerBuffer, 12, 0, token)) break;
@@ -222,10 +230,7 @@ namespace uwpscrcpy
                         totalSize += offset;
                     }
                     byte[] currentBuffer = RentBuffer(totalSize);
-                    if (isKey && _cachedConfigData != null)
-                    {
-                        Array.Copy(_cachedConfigData, 0, currentBuffer, 0, _cachedConfigData.Length);
-                    }
+                    if (isKey && _cachedConfigData != null) Array.Copy(_cachedConfigData, 0, currentBuffer, 0, _cachedConfigData.Length);
                     if (!await ReadExactToBufferAsync(stream, currentBuffer, (int)packetSize, offset, token))
                     {
                         ReturnBuffer(currentBuffer);
@@ -247,10 +252,7 @@ namespace uwpscrcpy
                             for (int i = 0; i < _sampleQueue.Count; ++i) _signal.Release();
                         }
                     }
-                    else
-                    {
-                        _signal.Release();
-                    }
+                    else _signal.Release();
                 }
             }
             catch (Exception ex) { Debug.WriteLine($"[CRASH] VideoLoop: {ex.Message}"); }
@@ -301,6 +303,12 @@ namespace uwpscrcpy
         private void VideoSurface_PointerMoved(object sender, PointerRoutedEventArgs e) { if (_isUhidMouseMode) return; if (e.Pointer.IsInContact) _session?.SendTouch(2, e, VideoSurface); }
         private void VideoSurface_PointerReleased(object sender, PointerRoutedEventArgs e) { if (_isUhidMouseMode) return; _session?.SendTouch(1, e, VideoSurface); }
 
+        private void VideoSurface_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+        {
+            if (_isUhidMouseMode) return;
+            _session?.SendScrollEvent(e, VideoSurface, false);
+        }
+
         private void ControlsOnlyToggle_Toggled(object sender, RoutedEventArgs e)
         {
             if (UhidMouseToggle != null)
@@ -310,42 +318,119 @@ namespace uwpscrcpy
             }
         }
 
+        private void UhidMouseToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (InvertScrollToggle != null)
+            {
+                InvertScrollToggle.IsEnabled = UhidMouseToggle.IsOn;
+            }
+        }
+
         private void MousePadArea_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            if (now - _lastTapTimestamp < DOUBLE_TAP_THRESHOLD_MS)
-            {
-                _isDragging = true;
-                _session?.SendHidInputEvent(MOUSE_BUTTON_LEFT, new Point(0, 0));
-                _lastTapTimestamp = 0;
-            }
+            uint ptrId = e.Pointer.PointerId;
+            var pos = e.GetCurrentPoint(MousePadArea).Position;
+
+            if (!_pointerPositions.ContainsKey(ptrId))
+                _pointerPositions.Add(ptrId, pos);
             else
+                _pointerPositions[ptrId] = pos;
+
+            if (_pointerPositions.Count == 1)
             {
-                _lastTapTimestamp = now;
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (now - _lastTapTimestamp < DOUBLE_TAP_THRESHOLD_MS)
+                {
+                    _isDragging = true;
+                    _session?.SendHidInputEvent(MOUSE_BUTTON_LEFT, new Point(0, 0));
+                    _lastTapTimestamp = 0;
+                }
+                else
+                {
+                    _lastTapTimestamp = now;
+                }
             }
-            _lastMousePosition = e.GetCurrentPoint(MousePadArea).Position;
         }
 
         private void MousePadArea_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
             if (!e.Pointer.IsInContact) return;
 
+            uint ptrId = e.Pointer.PointerId;
             var currentPosition = e.GetCurrentPoint(MousePadArea).Position;
-            var delta = new Point(currentPosition.X - _lastMousePosition.X, currentPosition.Y - _lastMousePosition.Y);
-            _lastMousePosition = currentPosition;
 
-            byte buttons = 0;
-            if (_isDragging || _isLeftMouseButtonDown)
+            Point previousPosition;
+            if (!_pointerPositions.TryGetValue(ptrId, out previousPosition))
             {
-                buttons |= MOUSE_BUTTON_LEFT;
+                _pointerPositions[ptrId] = currentPosition;
+                return;
             }
 
-            _session?.SendHidInputEvent(buttons, delta);
+            double MOUSE_SENSITIVITY = 1.25;
+
+            var delta = new Point(
+                (currentPosition.X - previousPosition.X) * MOUSE_SENSITIVITY,
+                (currentPosition.Y - previousPosition.Y) * MOUSE_SENSITIVITY
+            );
+
+            _pointerPositions[ptrId] = currentPosition;
+
+            if (_pointerPositions.Count == 1)
+            {
+                byte buttons = 0;
+                if (_isDragging || _isLeftMouseButtonDown)
+                {
+                    buttons |= MOUSE_BUTTON_LEFT;
+                }
+                _session?.SendHidInputEvent(buttons, delta);
+            }
+            else if (_pointerPositions.Count >= 2)
+            {
+
+                double rawDeltaY = delta.Y * SCROLL_SENSITIVITY;
+
+                if (Math.Abs(delta.Y) < 0.5)
+                {
+                    rawDeltaY = 0;
+                }
+
+                _scrollAccumulatorY += rawDeltaY;
+
+                if (Math.Abs(_scrollAccumulatorY) >= 1.0)
+                {
+                    int vScrollToSend = (int)_scrollAccumulatorY;
+                    _scrollAccumulatorY -= vScrollToSend;
+
+                    if (InvertScrollToggle.IsOn) vScrollToSend = -vScrollToSend;
+
+                    _session?.SendHidInputEvent(0, new Point(0, 0), vScrollToSend, 0);
+                }
+            }
         }
 
         private void MousePadArea_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
-            if (_isDragging)
+            CleanupPointer(e.Pointer.PointerId);
+        }
+
+        private void MousePadArea_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        {
+            CleanupPointer(e.Pointer.PointerId);
+        }
+
+        private void MousePadArea_PointerExited(object sender, PointerRoutedEventArgs e)
+        {
+            CleanupPointer(e.Pointer.PointerId);
+        }
+
+        private void CleanupPointer(uint ptrId)
+        {
+            if (_pointerPositions.ContainsKey(ptrId))
+            {
+                _pointerPositions.Remove(ptrId);
+            }
+
+            if (_isDragging && _pointerPositions.Count == 0)
             {
                 _isDragging = false;
                 _session?.SendHidInputEvent(0, new Point(0, 0));

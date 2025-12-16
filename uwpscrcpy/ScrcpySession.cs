@@ -26,6 +26,7 @@ namespace uwpscrcpy
         private bool isUhidMouse = false;
 
         private const byte SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT = 2;
+        private const byte SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT = 3;
         private const byte SC_CONTROL_MSG_TYPE_UHID_CREATE = 12;
         private const byte SC_CONTROL_MSG_TYPE_UHID_INPUT = 13;
         private const byte SC_CONTROL_MSG_TYPE_UHID_DESTROY = 14;
@@ -41,11 +42,7 @@ namespace uwpscrcpy
             0xC0,
         };
 
-        public ScrcpySession()
-        {
-            _crypto = new AdbCrypto();
-            _adb = new AdbClient();
-        }
+        public ScrcpySession() { _crypto = new AdbCrypto(); _adb = new AdbClient(); }
 
         public async Task ConnectAndStartAsync(string ip, int port, int bitRate, int maxSize, bool video, bool useUhidMouse, Action<string> logCallback)
         {
@@ -118,21 +115,13 @@ namespace uwpscrcpy
         {
             byte[] buffer = new byte[count];
             int offset = 0;
-            while (offset < count)
-            {
-                int read = await stream.ReadAsync(buffer, offset, count - offset, CancellationToken.None);
-                if (read == 0) throw new EndOfStreamException();
-                offset += read;
-            }
+            while (offset < count) { int read = await stream.ReadAsync(buffer, offset, count - offset, CancellationToken.None); if (read == 0) throw new EndOfStreamException(); offset += read; }
             return buffer;
         }
 
         public void SendTouch(byte action, PointerRoutedEventArgs e, FrameworkElement relativeTo)
         {
-            if (_controlStream == null || Width == 0 || Height == 0)
-            {
-                return;
-            }
+            if (_controlStream == null || Width == 0 || Height == 0) return;
             var pos = e.GetCurrentPoint(relativeTo).Position;
             try
             {
@@ -143,28 +132,73 @@ namespace uwpscrcpy
 
                 byte[] p = new byte[32];
                 p[0] = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
-                p[1] = action;
-                for (int i = 2; i < 10; i++) p[i] = 0xFF;
-                WriteInt32BE(p, 10, x);
-                WriteInt32BE(p, 14, y);
-                WriteUInt16BE(p, 18, (ushort)Width);
-                WriteUInt16BE(p, 20, (ushort)Height);
-                p[22] = 0xFF; p[23] = 0xFF;
-                WriteInt32BE(p, 24, 1);
+                p[1] = action; for (int i = 2; i < 10; i++) p[i] = 0xFF;
+                WriteInt32BE(p, 10, x); WriteInt32BE(p, 14, y);
+                WriteUInt16BE(p, 18, (ushort)Width); WriteUInt16BE(p, 20, (ushort)Height);
+                p[22] = 0xFF; p[23] = 0xFF; WriteInt32BE(p, 24, 1);
                 _controlStream.Write(p, 0, 32);
+            }
+            catch (Exception ex) { Debug.WriteLine($"[Touch Error] {ex.Message}"); }
+        }
+
+        public void SendScrollEvent(PointerRoutedEventArgs e, FrameworkElement relativeTo, bool invert)
+        {
+            if (_controlStream == null || Width == 0 || Height == 0) return;
+
+            var point = e.GetCurrentPoint(relativeTo);
+            var pos = point.Position;
+            var props = point.Properties;
+
+            try
+            {
+                const float ScrollSensitivity = 0.05f;
+                const float MaxScroll = 0.25f;
+
+                double scaleX = (double)Width / relativeTo.ActualWidth;
+                double scaleY = (double)Height / relativeTo.ActualHeight;
+
+                int x = Math.Max(0, Math.Min((int)Width, (int)(pos.X * scaleX)));
+                int y = Math.Max(0, Math.Min((int)Height, (int)(pos.Y * scaleY)));
+
+                float vScrollFloat = (float)props.MouseWheelDelta / 120.0f;
+
+                vScrollFloat *= ScrollSensitivity;
+
+                if (invert)
+                    vScrollFloat = -vScrollFloat;
+
+                vScrollFloat = Math.Max(-MaxScroll, Math.Min(MaxScroll, vScrollFloat));
+
+                short vScrollFixed = (short)Math.Round(vScrollFloat * 32767.0f);
+                short hScrollFixed = 0;
+
+                byte[] p = new byte[21];
+                int offset = 0;
+
+                p[offset++] = SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT;
+
+                WriteInt32BE(p, offset, x); offset += 4;
+                WriteInt32BE(p, offset, y); offset += 4;
+
+                WriteUInt16BE(p, offset, (ushort)Width); offset += 2;
+                WriteUInt16BE(p, offset, (ushort)Height); offset += 2;
+
+                WriteUInt16BE(p, offset, (ushort)hScrollFixed); offset += 2;
+                WriteUInt16BE(p, offset, (ushort)vScrollFixed); offset += 2;
+
+                WriteInt32BE(p, offset, 0);
+
+                _controlStream.Write(p, 0, 21);
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[Touch Error] {ex.Message}");
+                Debug.WriteLine($"[Scroll Error] {ex.Message}");
             }
         }
 
         private void SendHidCreateMouse()
         {
-            if (_controlStream == null)
-            {
-                return;
-            }
+            if (_controlStream == null) return;
             try
             {
                 byte[] message = new byte[1 + 2 + 2 + 2 + 1 + 0 + 2 + SC_HID_MOUSE_REPORT_DESC.Length];
@@ -176,29 +210,22 @@ namespace uwpscrcpy
                 message[offset++] = 0;
                 offset += WriteUInt16BE(message, offset, (ushort)SC_HID_MOUSE_REPORT_DESC.Length);
                 Array.Copy(SC_HID_MOUSE_REPORT_DESC, 0, message, offset, SC_HID_MOUSE_REPORT_DESC.Length);
-
                 _controlStream.Write(message, 0, message.Length);
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[HID Mouse Create Error] {ex.Message}");
-            }
+            catch (Exception ex) { Debug.WriteLine($"[HID Create Error] {ex.Message}"); }
         }
 
-        public void SendHidInputEvent(byte buttons, Point delta)
+        public void SendHidInputEvent(byte buttons, Point delta, int vScroll = 0, int hScroll = 0)
         {
-            if (_controlStream == null)
-            {
-                return;
-            }
+            if (_controlStream == null) return;
             try
             {
                 byte[] hidReport = new byte[5];
                 hidReport[0] = buttons;
                 hidReport[1] = (byte)(sbyte)Math.Max(-127, Math.Min(127, (int)delta.X));
                 hidReport[2] = (byte)(sbyte)Math.Max(-127, Math.Min(127, (int)delta.Y));
-                hidReport[3] = 0;
-                hidReport[4] = 0;
+                hidReport[3] = (byte)(sbyte)Math.Max(-127, Math.Min(127, vScroll));
+                hidReport[4] = (byte)(sbyte)Math.Max(-127, Math.Min(127, hScroll));
 
                 byte[] fullMessage = new byte[1 + 2 + 2 + hidReport.Length];
                 int offset = 0;
@@ -209,68 +236,30 @@ namespace uwpscrcpy
 
                 _controlStream.Write(fullMessage, 0, fullMessage.Length);
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[HID Mouse Input Error] {ex.Message}");
-            }
+            catch (Exception ex) { Debug.WriteLine($"[HID Input Error] {ex.Message}"); }
         }
 
         private void SendHidDestroyMouse()
         {
-            if (_controlStream == null)
-            {
-                return;
-            }
+            if (_controlStream == null) return;
             try
             {
                 byte[] message = new byte[1 + 2];
                 int offset = 0;
                 message[offset++] = SC_CONTROL_MSG_TYPE_UHID_DESTROY;
                 WriteUInt16BE(message, offset, SC_HID_ID_MOUSE);
-
                 _controlStream.Write(message, 0, message.Length);
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[HID Mouse Destroy Error] {ex.Message}");
-            }
+            catch (Exception ex) { Debug.WriteLine($"[HID Destroy Error] {ex.Message}"); }
         }
 
-        private int WriteUInt16BE(byte[] b, int offset, ushort val)
-        {
-            b[offset] = (byte)(val >> 8);
-            b[offset + 1] = (byte)(val);
-            return 2;
-        }
-
-        private void WriteInt32BE(byte[] b, int offset, int val)
-        {
-            b[offset] = (byte)(val >> 24);
-            b[offset + 1] = (byte)(val >> 16);
-            b[offset + 2] = (byte)(val >> 8);
-            b[offset + 3] = (byte)(val);
-        }
-
-        private string GetJarBase64()
-        {
-            using (var s = typeof(ScrcpySession).GetTypeInfo().Assembly.GetManifestResourceStream("uwpscrcpy.scrcpy-server.jar"))
-            {
-                if (s == null)
-                {
-                    throw new Exception("scrcpy-server.jar not found.");
-                }
-                var b = new byte[s.Length];
-                s.Read(b, 0, b.Length);
-                return Convert.ToBase64String(b);
-            }
-        }
+        private int WriteUInt16BE(byte[] b, int offset, ushort val) { b[offset] = (byte)(val >> 8); b[offset + 1] = (byte)(val); return 2; }
+        private void WriteInt32BE(byte[] b, int offset, int val) { b[offset] = (byte)(val >> 24); b[offset + 1] = (byte)(val >> 16); b[offset + 2] = (byte)(val >> 8); b[offset + 3] = (byte)(val); }
+        private string GetJarBase64() { using (var s = typeof(ScrcpySession).GetTypeInfo().Assembly.GetManifestResourceStream("uwpscrcpy.scrcpy-server.jar")) { if (s == null) throw new Exception("scrcpy-server.jar not found."); var b = new byte[s.Length]; s.Read(b, 0, b.Length); return Convert.ToBase64String(b); } }
 
         public void Dispose()
         {
-            if (isUhidMouse)
-            {
-                SendHidDestroyMouse();
-            }
+            if (isUhidMouse) SendHidDestroyMouse();
             _videoStream?.Dispose();
             _controlStream?.Dispose();
             _adb?.Dispose();

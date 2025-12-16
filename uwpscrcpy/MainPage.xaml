@@ -25,7 +25,9 @@
 
                                 <ToggleSwitch x:Name="ControlsOnlyToggle" Header="Controls Only Mode" IsOn="False" Foreground="White" Margin="0,0,0,16" Toggled="ControlsOnlyToggle_Toggled"/>
 
-                                <ToggleSwitch x:Name="UhidMouseToggle" Header="Enable Mouse (UHID)" IsOn="False" IsEnabled="False" Foreground="White" Margin="0,-8,0,16" ToolTipService.ToolTip="Shows a visible mouse cursor on the device. Only for Controls Only mode."/>
+                                <ToggleSwitch x:Name="UhidMouseToggle" Header="Enable Mouse (UHID)" IsOn="False" IsEnabled="False" Foreground="White" Margin="0,-8,0,0" Toggled="UhidMouseToggle_Toggled" ToolTipService.ToolTip="Shows a visible mouse cursor on the device. Only for Controls Only mode."/>
+
+                                <ToggleSwitch x:Name="InvertScrollToggle" Header="Invert Scroll Direction" IsOn="False" IsEnabled="False" Foreground="#AAAAAA" FontSize="12" Margin="0,-4,0,16"/>
 
                                 <Button x:Name="FullScreenButton" Content="Fullscreen" Height="42" FontSize="15" HorizontalAlignment="Stretch" Click="FullScreenButton_Click"/>
 
@@ -59,7 +61,13 @@
                 <Grid x:Name="ContentGrid" Background="Black">
                     <Grid x:Name="VideoContainer" Background="Black">
                         <Viewbox Stretch="Uniform">
-                            <Grid x:Name="VideoSurface" Background="Transparent" PointerPressed="VideoSurface_PointerPressed" PointerMoved="VideoSurface_PointerMoved" PointerReleased="VideoSurface_PointerReleased" PointerCanceled="VideoSurface_PointerReleased" PointerExited="VideoSurface_PointerReleased" />
+                            <Grid x:Name="VideoSurface" Background="Transparent" 
+                                  PointerPressed="VideoSurface_PointerPressed" 
+                                  PointerMoved="VideoSurface_PointerMoved" 
+                                  PointerReleased="VideoSurface_PointerReleased" 
+                                  PointerCanceled="VideoSurface_PointerReleased" 
+                                  PointerExited="VideoSurface_PointerReleased"
+                                  PointerWheelChanged="VideoSurface_PointerWheelChanged"/>
                         </Viewbox>
                     </Grid>
 
