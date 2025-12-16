@@ -253,9 +253,35 @@ namespace uwpscrcpy
             catch (Exception ex) { Debug.WriteLine($"[HID Destroy Error] {ex.Message}"); }
         }
 
-        private int WriteUInt16BE(byte[] b, int offset, ushort val) { b[offset] = (byte)(val >> 8); b[offset + 1] = (byte)(val); return 2; }
-        private void WriteInt32BE(byte[] b, int offset, int val) { b[offset] = (byte)(val >> 24); b[offset + 1] = (byte)(val >> 16); b[offset + 2] = (byte)(val >> 8); b[offset + 3] = (byte)(val); }
-        private string GetJarBase64() { using (var s = typeof(ScrcpySession).GetTypeInfo().Assembly.GetManifestResourceStream("uwpscrcpy.scrcpy-server.jar")) { if (s == null) throw new Exception("scrcpy-server.jar not found."); var b = new byte[s.Length]; s.Read(b, 0, b.Length); return Convert.ToBase64String(b); } }
+        private int WriteUInt16BE(byte[] b, int offset, ushort val)
+        {
+            b[offset] = (byte)(val >> 8);
+            b[offset + 1] = (byte)(val);
+            return 2;
+        }
+
+        private void WriteInt32BE(byte[] b, int offset, int val)
+        {
+            b[offset] = (byte)(val >> 24);
+            b[offset + 1] = (byte)(val >> 16);
+            b[offset + 2] = (byte)(val >> 8);
+            b[offset + 3] = (byte)(val);
+        }
+
+        private string GetJarBase64()
+        {
+            using (var s = typeof(ScrcpySession).GetTypeInfo()
+                                             .Assembly
+                                             .GetManifestResourceStream("uwpscrcpy.scrcpy-server.jar"))
+            {
+                if (s == null)
+                    throw new Exception("scrcpy-server.jar not found.");
+
+                var b = new byte[s.Length];
+                s.Read(b, 0, b.Length);
+                return Convert.ToBase64String(b);
+            }
+        }
 
         public void Dispose()
         {

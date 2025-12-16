@@ -17,11 +17,9 @@ namespace uwpscrcpy
         private readonly AdbClient _client;
         private readonly uint _localId;
         private readonly uint _remoteId;
-
         private readonly Queue<PooledChunk> _chunkQueue = new Queue<PooledChunk>();
         private readonly SemaphoreSlim _readSignal = new SemaphoreSlim(0);
         private readonly object _queueLock = new object();
-
         private readonly SemaphoreSlim _writeAckLatch = new SemaphoreSlim(1, 1);
 
         private PooledChunk _currentChunk;
@@ -47,7 +45,6 @@ namespace uwpscrcpy
                 SimpleBufferPool.Return(buffer);
                 return;
             }
-
             lock (_queueLock)
             {
                 _chunkQueue.Enqueue(new PooledChunk { Buffer = buffer, Length = length });
@@ -62,54 +59,48 @@ namespace uwpscrcpy
             if (_writeAckLatch.CurrentCount == 0) _writeAckLatch.Release();
         }
 
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         {
-            int totalRead = 0;
-
-            while (totalRead < count)
+            if (_currentChunk.Buffer != null)
             {
-                if (_currentChunk.Buffer != null)
+                int available = _currentChunk.Length - _currentChunkOffset;
+                if (available > 0)
                 {
-                    int available = _currentChunk.Length - _currentChunkOffset;
-                    int toCopy = Math.Min(count - totalRead, available);
+                    int toCopy = Math.Min(count, available);
+                    Buffer.BlockCopy(_currentChunk.Buffer, _currentChunkOffset, buffer, offset, toCopy);
 
-                    Array.Copy(_currentChunk.Buffer, _currentChunkOffset, buffer, offset + totalRead, toCopy);
-
-                    totalRead += toCopy;
                     _currentChunkOffset += toCopy;
-
                     if (_currentChunkOffset >= _currentChunk.Length)
                     {
                         SimpleBufferPool.Return(_currentChunk.Buffer);
                         _currentChunk.Buffer = null;
                     }
-
-                    if (totalRead > 0) return totalRead;
+                    return Task.FromResult(toCopy);
                 }
+            }
+            return ReadAsyncInternal(buffer, offset, count, cancellationToken);
+        }
 
-                if (_isClosed && _chunkQueue.Count == 0) return 0;
-
-                bool gotChunk = false;
-                lock (_queueLock)
+        private async Task<int> ReadAsyncInternal(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            if (_currentChunk.Buffer == null)
+            {
+                try
                 {
-                    if (_chunkQueue.Count > 0)
-                    {
-                        _currentChunk = _chunkQueue.Dequeue();
-                        gotChunk = true;
-                    }
+                    await _readSignal.WaitAsync(cancellationToken);
                 }
-
-                if (!gotChunk)
+                catch (OperationCanceledException)
                 {
-                    try
-                    {
-                        await _readSignal.WaitAsync(cancellationToken);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return 0;
-                    }
+                    return 0;
+                }
+            }
 
+            int totalCopied = 0;
+
+            while (count > 0)
+            {
+                if (_currentChunk.Buffer == null)
+                {
                     lock (_queueLock)
                     {
                         if (_chunkQueue.Count > 0)
@@ -117,20 +108,34 @@ namespace uwpscrcpy
                             _currentChunk = _chunkQueue.Dequeue();
                             _currentChunkOffset = 0;
                         }
-                        else if (_isClosed)
+                        else
                         {
-                            return 0;
+                            if (_isClosed) return totalCopied;
+                            if (totalCopied > 0) return totalCopied;
+                            break;
                         }
                     }
                 }
-                else
-                {
-                    if (_readSignal.CurrentCount > 0) await _readSignal.WaitAsync(0);
-                    _currentChunkOffset = 0;
-                }
-            }
 
-            return totalRead;
+                int available = _currentChunk.Length - _currentChunkOffset;
+                int toCopy = Math.Min(count, available);
+
+                Buffer.BlockCopy(_currentChunk.Buffer, _currentChunkOffset, buffer, offset, toCopy);
+
+                _currentChunkOffset += toCopy;
+                offset += toCopy;
+                count -= toCopy;
+                totalCopied += toCopy;
+
+                if (_currentChunkOffset >= _currentChunk.Length)
+                {
+                    SimpleBufferPool.Return(_currentChunk.Buffer);
+                    _currentChunk.Buffer = null;
+                }
+
+                return totalCopied;
+            }
+            return totalCopied;
         }
 
         public override int Read(byte[] buffer, int offset, int count)
@@ -143,9 +148,8 @@ namespace uwpscrcpy
             if (_isClosed) return;
             _writeAckLatch.Wait();
             if (_isClosed) return;
-
             byte[] payload = new byte[count];
-            Array.Copy(buffer, offset, payload, 0, count);
+            Buffer.BlockCopy(buffer, offset, payload, 0, count);
             _client.SendPacket(AdbProtocol.A_WRTE, _localId, _remoteId, payload);
         }
 
@@ -166,7 +170,11 @@ namespace uwpscrcpy
                 SignalClose();
             }
 
-            if (_currentChunk.Buffer != null) SimpleBufferPool.Return(_currentChunk.Buffer);
+            if (_currentChunk.Buffer != null)
+            {
+                SimpleBufferPool.Return(_currentChunk.Buffer);
+                _currentChunk.Buffer = null;
+            }
 
             lock (_queueLock)
             {
