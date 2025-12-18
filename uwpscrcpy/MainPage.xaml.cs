@@ -150,7 +150,7 @@ namespace uwpscrcpy
                 int bitRate = (mbps > 0) ? mbps * 1000000 : 4000000;
 
                 int.TryParse(maxSizeBox.Text, out int size);
-                int maxSize = (size > 144) ? size : 144;
+                int maxSize = size;
 
                 bool video = !ControlsOnlyToggle.IsOn;
                 _isUhidMouseMode = UhidMouseToggle.IsOn && !video;
