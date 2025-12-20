@@ -27,6 +27,7 @@ namespace uwpscrcpy
 
         private const byte SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT = 2;
         private const byte SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT = 3;
+        private const byte SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON = 4;
         private const byte SC_CONTROL_MSG_TYPE_UHID_CREATE = 12;
         private const byte SC_CONTROL_MSG_TYPE_UHID_INPUT = 13;
         private const byte SC_CONTROL_MSG_TYPE_UHID_DESTROY = 14;
@@ -45,7 +46,7 @@ namespace uwpscrcpy
 
         public ScrcpySession() { _crypto = new AdbCrypto(); _adb = new AdbClient(); }
 
-        public async Task ConnectAndStartAsync(string ip, int port, int bitRate, int maxSize, bool video, bool useUhidMouse, Action<string> logCallback)
+        public async Task ConnectAndStartAsync(string ip, int port, int bitRate, int maxSize, int maxFps, bool video, bool useUhidMouse, Action<string> logCallback)
         {
             logCallback?.Invoke($"Connecting to {ip}:{port}...");
             await _adb.Connect(ip, port, _crypto);
@@ -59,7 +60,7 @@ namespace uwpscrcpy
             {
                 string serverArgs = $"log_level=info tunnel_forward=true audio=false send_dummy_byte=false " +
                                     $"send_device_meta=true send_codec_meta=true video=true control=true " +
-                                    $"video_bit_rate={bitRate} max_size={maxSize}";
+                                    $"video_bit_rate={bitRate} max_size={maxSize} max_fps={maxFps}";
 
                 cmd = $"CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 scid=00000001 {serverArgs}";
 
@@ -162,37 +163,14 @@ namespace uwpscrcpy
             });
         }
 
-        public void SendScrollEvent(PointerRoutedEventArgs e, FrameworkElement relativeTo, bool invert)
+        public void SendScrollEvent(int x, int y, short hScroll, short vScroll, int buttons)
         {
             if (_controlStream == null || Width == 0 || Height == 0) return;
-
-            var point = e.GetCurrentPoint(relativeTo);
-            var pos = point.Position;
-            var props = point.Properties;
-            double actualWidth = relativeTo.ActualWidth;
-            double actualHeight = relativeTo.ActualHeight;
 
             Task.Run(async () =>
             {
                 try
                 {
-                    const float ScrollSensitivity = 0.05f;
-                    const float MaxScroll = 0.25f;
-
-                    double scaleX = (double)Width / actualWidth;
-                    double scaleY = (double)Height / actualHeight;
-
-                    int x = Math.Max(0, Math.Min((int)Width, (int)(pos.X * scaleX)));
-                    int y = Math.Max(0, Math.Min((int)Height, (int)(pos.Y * scaleY)));
-
-                    float vScrollFloat = (float)props.MouseWheelDelta / 120.0f;
-                    vScrollFloat *= ScrollSensitivity;
-                    if (invert) vScrollFloat = -vScrollFloat;
-
-                    vScrollFloat = Math.Max(-MaxScroll, Math.Min(MaxScroll, vScrollFloat));
-                    short vScrollFixed = (short)Math.Round(vScrollFloat * 32767.0f);
-                    short hScrollFixed = 0;
-
                     byte[] p = new byte[21];
                     int offset = 0;
                     p[offset++] = SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT;
@@ -200,16 +178,29 @@ namespace uwpscrcpy
                     WriteInt32BE(p, offset, y); offset += 4;
                     WriteUInt16BE(p, offset, (ushort)Width); offset += 2;
                     WriteUInt16BE(p, offset, (ushort)Height); offset += 2;
-                    WriteUInt16BE(p, offset, (ushort)hScrollFixed); offset += 2;
-                    WriteUInt16BE(p, offset, (ushort)vScrollFixed); offset += 2;
-                    WriteInt32BE(p, offset, 0);
+                    WriteInt16BE(p, offset, hScroll); offset += 2;
+                    WriteInt16BE(p, offset, vScroll); offset += 2;
+                    WriteInt32BE(p, offset, buttons);
 
-                    await _controlStream.WriteAsync(p, 0, 21, CancellationToken.None);
+                    await _controlStream.WriteAsync(p, 0, p.Length, CancellationToken.None);
                 }
-                catch (Exception ex)
+                catch (Exception ex) { Debug.WriteLine($"[Scroll Error] {ex.Message}"); }
+            });
+        }
+
+        public void SendBackEvent(byte action)
+        {
+            if (_controlStream == null) return;
+            Task.Run(async () =>
+            {
+                try
                 {
-                    Debug.WriteLine($"[Scroll Error] {ex.Message}");
+                    byte[] p = new byte[2];
+                    p[0] = SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON;
+                    p[1] = action;
+                    await _controlStream.WriteAsync(p, 0, p.Length, CancellationToken.None);
                 }
+                catch (Exception ex) { Debug.WriteLine($"[Back Error] {ex.Message}"); }
             });
         }
 
@@ -279,10 +270,17 @@ namespace uwpscrcpy
             });
         }
 
+        private int WriteInt16BE(byte[] b, int offset, short val)
+        {
+            b[offset] = (byte)(val >> 8);
+            b[offset + 1] = (byte)val;
+            return 2;
+        }
+
         private int WriteUInt16BE(byte[] b, int offset, ushort val)
         {
             b[offset] = (byte)(val >> 8);
-            b[offset + 1] = (byte)(val);
+            b[offset + 1] = (byte)val;
             return 2;
         }
 
@@ -291,14 +289,14 @@ namespace uwpscrcpy
             b[offset] = (byte)(val >> 24);
             b[offset + 1] = (byte)(val >> 16);
             b[offset + 2] = (byte)(val >> 8);
-            b[offset + 3] = (byte)(val);
+            b[offset + 3] = (byte)val;
         }
 
         private string GetJarBase64()
         {
             using (var s = typeof(ScrcpySession).GetTypeInfo()
                                              .Assembly
-                                             .GetManifestResourceStream("uwpscrcpy.scrcpy-server.jar"))
+                                             .GetManifestResourceStream("uwpscrcpy.Vendor.scrcpy-server.jar"))
             {
                 if (s == null)
                     throw new Exception("scrcpy-server.jar not found.");
@@ -316,4 +314,4 @@ namespace uwpscrcpy
             _adb?.Dispose();
         }
     }
-}   
+}

@@ -1,0 +1,347 @@
+﻿<Page
+    x:Class="uwpscrcpy.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    RequestedTheme="Default"
+    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+    mc:Ignorable="d">
+
+    <!-- ========================================================= -->
+    <!-- Page-level resources                                     -->
+    <!-- IMPORTANT: All brushes used here exist in Windows 10 1703 -->
+    <!-- ========================================================= -->
+    <Page.Resources>
+
+        <!-- Text colors -->
+        <SolidColorBrush x:Key="PrimaryTextBrush"
+                         Color="{ThemeResource SystemBaseHighColor}" />
+        <SolidColorBrush x:Key="SecondaryTextBrush"
+                         Color="{ThemeResource SystemBaseMediumColor}" />
+        <SolidColorBrush x:Key="DisabledTextBrush"
+                         Color="{ThemeResource SystemBaseLowColor}" />
+
+        <!-- Backgrounds -->
+        <SolidColorBrush x:Key="PageBackgroundBrush"
+                         Color="{ThemeResource SystemAltHighColor}" />
+        <SolidColorBrush x:Key="PaneBackgroundBrush"
+                         Color="{ThemeResource SystemChromeLowColor}" />
+        <SolidColorBrush x:Key="SurfaceBrush"
+                         Color="{ThemeResource SystemChromeMediumLowColor}" />
+
+        <!-- Dividers -->
+        <SolidColorBrush x:Key="DividerBrush"
+                         Color="{ThemeResource SystemChromeLowColor}" />
+
+        <!-- Video surface must always be black -->
+        <SolidColorBrush x:Key="VideoPlayerBackgroundBrush"
+                         Color="Black" />
+
+    </Page.Resources>
+
+    <!-- Root layout container -->
+    <Grid x:Name="RootGrid"
+          Background="{ThemeResource PageBackgroundBrush}">
+
+        <!-- ===================================================== -->
+        <!-- SplitView                                             -->
+        <!-- Works in 1703 (Overlay mode is safest on ARM)          -->
+        <!-- ===================================================== -->
+        <SplitView x:Name="MainSplitView"
+                   DisplayMode="Overlay"
+                   OpenPaneLength="320"
+                   IsPaneOpen="True"
+                   PanePlacement="Right"
+                   PaneBackground="{ThemeResource PaneBackgroundBrush}">
+
+            <!-- ============================== -->
+            <!-- RIGHT SIDE CONTROL PANE         -->
+            <!-- ============================== -->
+            <SplitView.Pane>
+                <Border BorderBrush="{ThemeResource DividerBrush}"
+                        BorderThickness="1,0,0,0">
+
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  Padding="24">
+
+                        <StackPanel>
+
+                            <!-- App title -->
+                            <TextBlock Text="UWP Scrcpy"
+                                       FontSize="24"
+                                       FontWeight="SemiBold"
+                                       Foreground="{ThemeResource PrimaryTextBrush}"
+                                       Margin="0,0,0,24"/>
+
+                            <!-- ============================== -->
+                            <!-- Connection section              -->
+                            <!-- ============================== -->
+                            <Border Background="{ThemeResource SurfaceBrush}"
+                                    Padding="16"
+                                    Margin="0,0,0,12">
+                                <StackPanel>
+
+                                    <TextBlock Text="Connection"
+                                               FontWeight="SemiBold"
+                                               Foreground="{ThemeResource PrimaryTextBrush}"
+                                               Margin="0,0,0,12"/>
+
+                                    <ToggleButton x:Name="ConnectToggle"
+                                                  Height="40"
+                                                  Content="Start"
+                                                  HorizontalAlignment="Stretch"
+                                                  Click="ConnectToggle_Click"/>
+
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ============================== -->
+                            <!-- Device settings section         -->
+                            <!-- ============================== -->
+                            <Border Background="{ThemeResource SurfaceBrush}"
+                                    Padding="16"
+                                    Margin="0,0,0,12">
+                                <StackPanel>
+
+                                    <TextBlock Text="Device Settings"
+                                               FontWeight="SemiBold"
+                                               Foreground="{ThemeResource PrimaryTextBrush}"
+                                               Margin="0,0,0,12"/>
+
+                                    <!-- Two-column layout -->
+                                    <Grid>
+
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <!-- IP -->
+                                        <TextBlock Text="IP Address"
+                                                   Grid.Row="0"
+                                                   Margin="0,0,12,0"
+                                                   Foreground="{ThemeResource SecondaryTextBrush}"/>
+                                        <TextBox x:Name="IpAddressBox"
+                                                 Grid.Row="0"
+                                                 Grid.Column="1"
+                                                 Text="192.168.1.8"/>
+
+                                        <!-- Port -->
+                                        <TextBlock Text="Port"
+                                                   Grid.Row="1"
+                                                   Margin="0,0,12,0"
+                                                   Foreground="{ThemeResource SecondaryTextBrush}"/>
+                                        <TextBox x:Name="PortBox"
+                                                 Grid.Row="1"
+                                                 Grid.Column="1"
+                                                 Text="5555"/>
+
+                                        <!-- Max Height -->
+                                        <TextBlock Text="Max Height"
+                                                   Grid.Row="2"
+                                                   Margin="0,0,12,0"
+                                                   Foreground="{ThemeResource SecondaryTextBrush}"/>
+                                        <TextBox x:Name="MaxSizeBox"
+                                                 Grid.Row="2"
+                                                 Grid.Column="1"
+                                                 Text="720"/>
+
+                                        <!-- FPS -->
+                                        <TextBlock Text="Max FPS"
+                                                   Grid.Row="3"
+                                                   Margin="0,0,12,0"
+                                                   Foreground="{ThemeResource SecondaryTextBrush}"/>
+                                        <TextBox x:Name="MaxFpsBox"
+                                                 Grid.Row="3"
+                                                 Grid.Column="1"
+                                                 Text="30"/>
+
+                                        <!-- Bitrate -->
+                                        <TextBlock Text="Bitrate (Mbps)"
+                                                   Grid.Row="4"
+                                                   Margin="0,0,12,0"
+                                                   Foreground="{ThemeResource SecondaryTextBrush}"/>
+                                        <TextBox x:Name="BitRateBox"
+                                                 Grid.Row="4"
+                                                 Grid.Column="1"
+                                                 Text="4"/>
+
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ============================== -->
+                            <!-- Options section                -->
+                            <!-- ============================== -->
+                            <Border Background="{ThemeResource SurfaceBrush}"
+                                    Padding="16"
+                                    Margin="0,0,0,12">
+                                <StackPanel>
+
+                                    <TextBlock Text="Options"
+                                               FontWeight="SemiBold"
+                                               Margin="0,0,0,8"/>
+
+                                    <ToggleSwitch x:Name="ControlsOnlyToggle"
+                                                  Header="Controls Only Mode"
+                                                  IsOn="False"
+                                                  Toggled="ControlsOnlyToggle_Toggled"/>
+
+                                    <ToggleSwitch x:Name="UhidMouseToggle"
+                                                  Header="Enable Mouse (UHID)"
+                                                  IsOn="False"
+                                                  IsEnabled="False"
+                                                  Toggled="UhidMouseToggle_Toggled"/>
+
+                                    <ToggleSwitch x:Name="InvertScrollToggle"
+                                                  Header="Invert Scroll Direction"
+                                                  IsOn="False"
+                                                  IsEnabled="False"/>
+
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ============================== -->
+                            <!-- Actions                        -->
+                            <!-- ============================== -->
+                            <Button x:Name="FullScreenButton"
+                                    Content="Fullscreen"
+                                    Height="40"
+                                    HorizontalAlignment="Stretch"
+                                    Click="FullScreenButton_Click"
+                                    Margin="0,0,0,8"/>
+
+                            <Button Content="Close Menu"
+                                    Height="40"
+                                    HorizontalAlignment="Stretch"
+                                    Click="HamburgerButton_Click"/>
+
+                            <!-- ============================== -->
+                            <!-- Logs                           -->
+                            <!-- ============================== -->
+                            <Rectangle Height="1"
+                                       Fill="{ThemeResource DividerBrush}"
+                                       Margin="0,24,0,16"/>
+
+                            <TextBlock Text="Logs"
+                                       Foreground="{ThemeResource SecondaryTextBrush}"
+                                       Margin="0,0,0,8"/>
+
+                            <TextBox x:Name="LogBlock"
+                                     Height="150"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     FontSize="11"
+                                     Foreground="{ThemeResource SecondaryTextBrush}"
+                                     Background="{ThemeResource SurfaceBrush}"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                     BorderThickness="0"
+                                     Padding="8"/>
+
+                        </StackPanel>
+                    </ScrollViewer>
+                </Border>
+            </SplitView.Pane>
+
+            <!-- ============================== -->
+            <!-- MAIN CONTENT AREA               -->
+            <!-- ============================== -->
+            <SplitView.Content>
+                <Grid x:Name="ContentGrid"
+                      Background="{ThemeResource PageBackgroundBrush}">
+
+                    <!-- Video container (always black) -->
+                    <Grid x:Name="VideoContainer"
+                          Background="{ThemeResource VideoPlayerBackgroundBrush}">
+
+                        <Viewbox Stretch="Uniform">
+                            <Grid x:Name="VideoSurface"
+                                  Background="Black"
+                                  PointerPressed="VideoSurface_PointerPressed"
+                                  PointerMoved="VideoSurface_PointerMoved"
+                                  PointerReleased="VideoSurface_PointerReleased"
+                                  PointerCanceled="VideoSurface_PointerReleased"
+                                  PointerExited="VideoSurface_PointerReleased"
+                                  PointerWheelChanged="VideoSurface_PointerWheelChanged"/>
+                        </Viewbox>
+                    </Grid>
+
+                    <!-- Mouse / touchpad controls -->
+                    <Grid x:Name="MouseControlContainer"
+                          Background="Black"
+                          Visibility="Collapsed">
+
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="80" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Touchpad -->
+                        <Grid x:Name="MousePadArea"
+                              Grid.Row="0"
+                              Background="#111111"
+                              PointerPressed="MousePadArea_PointerPressed"
+                              PointerMoved="MousePadArea_PointerMoved"
+                              PointerReleased="MousePadArea_PointerReleased"
+                              PointerCanceled="MousePadArea_PointerReleased"
+                              PointerExited="MousePadArea_PointerReleased"/>
+
+                        <!-- Mouse buttons -->
+                        <Grid Grid.Row="1"
+                              Background="#000000">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+
+                            <Border x:Name="LeftClickArea"
+                                    Grid.Column="0"
+                                    Background="#222222"
+                                    BorderBrush="#333333"
+                                    BorderThickness="0,1,1,0"
+                                    PointerPressed="LeftClickArea_PointerPressed"
+                                    PointerReleased="LeftClickArea_PointerReleased"/>
+
+                            <Border x:Name="RightClickArea"
+                                    Grid.Column="1"
+                                    Background="#222222"
+                                    BorderBrush="#333333"
+                                    BorderThickness="0,1,0,0"
+                                    PointerPressed="RightClickArea_PointerPressed"
+                                    PointerReleased="RightClickArea_PointerReleased"/>
+                        </Grid>
+                    </Grid>
+
+                    <!-- Hamburger menu button -->
+                    <StackPanel VerticalAlignment="Top"
+                                HorizontalAlignment="Right"
+                                Margin="0,12,12,0">
+
+                        <Button x:Name="HamburgerButton"
+                                Width="44"
+                                Height="44"
+                                Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                                Foreground="{ThemeResource PrimaryTextBrush}"
+                                Click="HamburgerButton_Click">
+                            <FontIcon Glyph="&#xE700;"
+                                      FontFamily="Segoe MDL2 Assets"/>
+                        </Button>
+
+                    </StackPanel>
+
+                </Grid>
+            </SplitView.Content>
+
+        </SplitView>
+    </Grid>
+</Page>

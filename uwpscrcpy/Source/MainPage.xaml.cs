@@ -23,23 +23,30 @@ namespace uwpscrcpy
     {
         private const bool ENABLE_DEBUG_LOGGING = false;
         private const int POOL_BUFFER_SIZE = 512 * 1024;
-        private const int MAX_QUEUED_FRAMES = 15;
-
-        private readonly TimeSpan PLAYER_BUFFER_TIME = TimeSpan.FromMilliseconds(150);
 
         private ScrcpySession _session;
         private CancellationTokenSource _cts;
         private MediaPlayer _mediaPlayer;
         private MediaPlayerElement _currentVideoElement;
         private MediaStreamSource _mss;
-        private readonly ConcurrentQueue<MediaStreamSample> _sampleQueue = new ConcurrentQueue<MediaStreamSample>();
-        private readonly SemaphoreSlim _signal = new SemaphoreSlim(0);
+
+        private readonly object _lock = new object();
+        private readonly Queue<MediaStreamSample> _sampleQueue = new Queue<MediaStreamSample>();
+        private MediaStreamSourceSampleRequest _pendingRequest;
+        private MediaStreamSourceSampleRequestDeferral _pendingDeferral;
+
+        private const int TARGET_QUEUE_SIZE = 5;
+        private const int MAX_QUEUE_SIZE = 15;
+
         private byte[] _cachedConfigData = null;
         private long _baselinePts = -1;
         private bool _waitingForKeyFrame = true;
         private readonly byte[] _headerBuffer = new byte[12];
         private readonly ConcurrentStack<byte[]> _frameDataPool = new ConcurrentStack<byte[]>();
         private readonly DisplayRequest _displayRequest = new DisplayRequest();
+
+        private bool _sessionActive = false;
+        private bool _isReconnectDialogShowing = false;
 
         private bool _isUhidMouseMode = false;
         private bool _isLeftMouseButtonDown = false;
@@ -119,7 +126,8 @@ namespace uwpscrcpy
             IpAddressBox.IsEnabled = enabled;
             PortBox.IsEnabled = enabled;
             BitRateBox.IsEnabled = enabled;
-            maxSizeBox.IsEnabled = enabled;
+            MaxSizeBox.IsEnabled = enabled;
+            MaxFpsBox.IsEnabled = enabled;
             ControlsOnlyToggle.IsEnabled = enabled;
             UhidMouseToggle.IsEnabled = enabled && ControlsOnlyToggle.IsOn;
             InvertScrollToggle.IsEnabled = enabled && UhidMouseToggle.IsOn;
@@ -149,8 +157,11 @@ namespace uwpscrcpy
                 int.TryParse(BitRateBox.Text, out int mbps);
                 int bitRate = (mbps > 0) ? mbps * 1000000 : 4000000;
 
-                int.TryParse(maxSizeBox.Text, out int size);
+                int.TryParse(MaxSizeBox.Text, out int size);
                 int maxSize = size;
+
+                int.TryParse(MaxFpsBox.Text, out int fps);
+                int maxFps = (fps > 0) ? fps : 30;
 
                 bool video = !ControlsOnlyToggle.IsOn;
                 _isUhidMouseMode = UhidMouseToggle.IsOn && !video;
@@ -166,7 +177,7 @@ namespace uwpscrcpy
                     };
                 }
 
-                await _session.ConnectAndStartAsync(ip, port, bitRate, maxSize, video, _isUhidMouseMode, Log);
+                await _session.ConnectAndStartAsync(ip, port, bitRate, maxSize, maxFps, video, _isUhidMouseMode, Log);
 
                 if (_isUhidMouseMode)
                 {
@@ -206,6 +217,8 @@ namespace uwpscrcpy
             _pendingMouseX = 0;
             _pendingMouseY = 0;
             _waitingForKeyFrame = true;
+
+            _sessionActive = false;
 
             MouseControlContainer.Visibility = Visibility.Collapsed;
             VideoContainer.Visibility = Visibility.Visible;
@@ -277,17 +290,24 @@ namespace uwpscrcpy
 
                     if (isConfig)
                     {
-                        var configData = new byte[packetSize];
-                        if (!await ReadExactAsync(stream, configData, 0, (int)packetSize, token)) break;
-                        _cachedConfigData = configData;
-                        await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () => InitVideoPlayer(_cachedConfigData));
-                        continue;
-                    }
+                        if (!_sessionActive)
+                        {
+                            var configData = new byte[packetSize];
+                            if (!await ReadExactAsync(stream, configData, 0, (int)packetSize, token)) break;
+                            _cachedConfigData = configData;
+                            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () => InitVideoPlayer(_cachedConfigData));
+                            _waitingForKeyFrame = true;
+                            _sessionActive = true;
+                        }
+                        else
+                        {
+                            var trash = RentFrameBuffer((int)packetSize);
+                            await ReadExactAsync(stream, trash, 0, (int)packetSize, token);
+                            ReturnFrameBuffer(trash);
 
-                    if (_sampleQueue.Count > MAX_QUEUED_FRAMES && !_waitingForKeyFrame)
-                    {
-                        _waitingForKeyFrame = true;
-                        FlushQueue();
+                            _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () => await PromptForReconnect());
+                        }
+                        continue;
                     }
 
                     if (_waitingForKeyFrame && !isKey)
@@ -334,8 +354,34 @@ namespace uwpscrcpy
                         sample.KeyFrame = isKey;
                         sample.Processed += (s, e) => ReturnFrameBuffer(decoderBuffer);
 
-                        _sampleQueue.Enqueue(sample);
-                        _signal.Release();
+                        lock (_lock)
+                        {
+                            if (_pendingDeferral != null)
+                            {
+                                _pendingRequest.Sample = sample;
+                                _pendingDeferral.Complete();
+                                _pendingRequest = null;
+                                _pendingDeferral = null;
+                            }
+                            else
+                            {
+                                int qSize = _sampleQueue.Count;
+                                if (qSize > MAX_QUEUE_SIZE)
+                                {
+                                    _sampleQueue.Clear();
+                                    _waitingForKeyFrame = true;
+                                    ReturnFrameBuffer(decoderBuffer);
+                                }
+                                else if (qSize > TARGET_QUEUE_SIZE && !isKey)
+                                {
+                                    ReturnFrameBuffer(decoderBuffer);
+                                }
+                                else
+                                {
+                                    _sampleQueue.Enqueue(sample);
+                                }
+                            }
+                        }
                     }
                     else
                     {
@@ -345,6 +391,32 @@ namespace uwpscrcpy
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) { Log($"Video Err: {ex.Message}"); }
+        }
+
+        private async Task PromptForReconnect()
+        {
+            if (_isReconnectDialogShowing) return;
+
+            _isReconnectDialogShowing = true;
+
+            var dialog = new ContentDialog
+            {
+                Title = "Resolution Change Detected",
+                Content = "The device's screen orientation or resolution has changed. Would you like to restart the stream to match?",
+                PrimaryButtonText = "Restart",
+                CloseButtonText = "Cancel"
+            };
+
+            ContentDialogResult result = await dialog.ShowAsync();
+
+            if (result == ContentDialogResult.Primary)
+            {
+                Cleanup();
+                await StartConnection();
+                ConnectToggle.IsChecked = true;
+            }
+
+            _isReconnectDialogShowing = false;
         }
 
         private async Task<bool> ReadExactAsync(AdbStream stream, byte[] buffer, int offset, int count, CancellationToken token)
@@ -361,8 +433,15 @@ namespace uwpscrcpy
 
         private void FlushQueue()
         {
-            while (_sampleQueue.TryDequeue(out var s)) { }
-            while (_signal.CurrentCount > 0) _signal.Wait(0);
+            lock (_lock)
+            {
+                _sampleQueue.Clear();
+                if (_pendingDeferral != null)
+                {
+                    _pendingDeferral = null;
+                    _pendingRequest = null;
+                }
+            }
         }
 
         private void InitVideoPlayer(byte[] codecPrivateData)
@@ -383,34 +462,41 @@ namespace uwpscrcpy
 
             _mss = new MediaStreamSource(new VideoStreamDescriptor(videoProps))
             {
-                BufferTime = PLAYER_BUFFER_TIME,
+                BufferTime = TimeSpan.Zero,
                 CanSeek = false
             };
             _mss.SampleRequested += OnSampleRequested;
+            _mediaPlayer.RealTimePlayback = true;
             _mediaPlayer.Source = MediaSource.CreateFromMediaStreamSource(_mss);
         }
 
-        private async void OnSampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
+        private void OnSampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
         {
-            var deferral = args.Request.GetDeferral();
-            try
+            lock (_lock)
             {
-                if (await _signal.WaitAsync(1000, _cts.Token))
+                if (_sampleQueue.Count > 0)
                 {
-                    if (_sampleQueue.TryDequeue(out MediaStreamSample sample))
-                    {
-                        args.Request.Sample = sample;
-                    }
+                    args.Request.Sample = _sampleQueue.Dequeue();
+                }
+                else
+                {
+                    _pendingRequest = args.Request;
+                    _pendingDeferral = args.Request.GetDeferral();
                 }
             }
-            catch { }
-            finally { deferral.Complete(); }
         }
 
         private void VideoSurface_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (_isUhidMouseMode) return;
-            _session?.SendTouch(0, e, VideoSurface);
+            if (_isUhidMouseMode || _session == null) return;
+
+            var properties = e.GetCurrentPoint(VideoSurface).Properties;
+            if (properties.IsRightButtonPressed)
+            {
+                e.Handled = true;
+                return;
+            }
+            _session.SendTouch(0, e, VideoSurface);
         }
 
         private void VideoSurface_PointerMoved(object sender, PointerRoutedEventArgs e)
@@ -430,14 +516,51 @@ namespace uwpscrcpy
 
         private void VideoSurface_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
-            if (_isUhidMouseMode) return;
-            _session?.SendTouch(1, e, VideoSurface);
+            if (_isUhidMouseMode || _session == null) return;
+
+            var updateKind = e.GetCurrentPoint(VideoSurface).Properties.PointerUpdateKind;
+            if (updateKind == Windows.UI.Input.PointerUpdateKind.RightButtonReleased)
+            {
+                _session.SendBackEvent(0);
+                _session.SendBackEvent(1);
+                e.Handled = true;
+                return;
+            }
+            _session.SendTouch(1, e, VideoSurface);
         }
 
         private void VideoSurface_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
         {
-            if (_isUhidMouseMode) return;
-            _session?.SendScrollEvent(e, VideoSurface, false);
+            if (_isUhidMouseMode || _session == null) return;
+
+            var point = e.GetCurrentPoint(VideoSurface);
+            var pos = point.Position;
+            var props = point.Properties;
+
+            double actualWidth = VideoSurface.ActualWidth;
+            double actualHeight = VideoSurface.ActualHeight;
+
+            double scaleX = (double)_session.Width / actualWidth;
+            double scaleY = (double)_session.Height / actualHeight;
+            int x = Math.Max(0, Math.Min((int)_session.Width, (int)(pos.X * scaleX)));
+            int y = Math.Max(0, Math.Min((int)_session.Height, (int)(pos.Y * scaleY)));
+
+            const float ScrollSensitivity = 0.05f;
+            const float MaxScroll = 1.0f;
+
+            float vScrollFloat = (float)props.MouseWheelDelta / 120.0f;
+            vScrollFloat *= ScrollSensitivity;
+            if (InvertScrollToggle.IsOn) vScrollFloat = -vScrollFloat;
+
+            vScrollFloat = Math.Max(-MaxScroll, Math.Min(MaxScroll, vScrollFloat));
+            short vScrollFixed = (short)Math.Round(vScrollFloat * 32767.0f);
+
+            int buttons = 0;
+            if (props.IsLeftButtonPressed) buttons |= 1;
+            if (props.IsRightButtonPressed) buttons |= 2;
+            if (props.IsMiddleButtonPressed) buttons |= 4;
+
+            _session.SendScrollEvent(x, y, 0, vScrollFixed, buttons);
         }
 
         private void ControlsOnlyToggle_Toggled(object sender, RoutedEventArgs e)
