@@ -10,7 +10,6 @@
 
     <!-- ========================================================= -->
     <!-- Page-level resources                                     -->
-    <!-- IMPORTANT: All brushes used here exist in Windows 10 1703 -->
     <!-- ========================================================= -->
     <Page.Resources>
 
@@ -46,7 +45,6 @@
 
         <!-- ===================================================== -->
         <!-- SplitView                                             -->
-        <!-- Works in 1703 (Overlay mode is safest on ARM)          -->
         <!-- ===================================================== -->
         <SplitView x:Name="MainSplitView"
                    DisplayMode="Overlay"
@@ -265,14 +263,20 @@
                           Background="{ThemeResource VideoPlayerBackgroundBrush}">
 
                         <Viewbox Stretch="Uniform">
-                            <Grid x:Name="VideoSurface"
-                                  Background="Black"
-                                  PointerPressed="VideoSurface_PointerPressed"
-                                  PointerMoved="VideoSurface_PointerMoved"
-                                  PointerReleased="VideoSurface_PointerReleased"
-                                  PointerCanceled="VideoSurface_PointerReleased"
-                                  PointerExited="VideoSurface_PointerReleased"
-                                  PointerWheelChanged="VideoSurface_PointerWheelChanged"/>
+                            <!-- FIX: Removed Background="Black" which caused the crash -->
+                            <SwapChainPanel x:Name="VideoPanel"
+                                            PointerPressed="VideoSurface_PointerPressed"
+                                            PointerMoved="VideoSurface_PointerMoved"
+                                            PointerReleased="VideoSurface_PointerReleased"
+                                            PointerCanceled="VideoSurface_PointerReleased"
+                                            PointerExited="VideoSurface_PointerReleased"
+                                            PointerWheelChanged="VideoSurface_PointerWheelChanged">
+
+                                <!-- FIX: Added invisible Grid to capture mouse/touch inputs -->
+                                <!-- This is required because SwapChainPanel cannot have a Background -->
+                                <Grid Background="Transparent" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+
+                            </SwapChainPanel>
                         </Viewbox>
                     </Grid>
 

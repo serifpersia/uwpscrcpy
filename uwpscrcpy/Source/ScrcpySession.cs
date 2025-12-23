@@ -58,17 +58,17 @@ namespace uwpscrcpy
             string cmd;
             if (video)
             {
-                string serverArgs = $"log_level=info tunnel_forward=true audio=false send_dummy_byte=false " +
-                                    $"send_device_meta=true send_codec_meta=true video=true control=true " +
-                                    $"video_bit_rate={bitRate} max_size={maxSize} max_fps={maxFps}";
+                string serverArgs = $"log_level=info tunnel_forward=true video=true audio=false controls=true " +
+                                    $"send_dummy_byte=true send_device_meta=true send_codec_meta=true " +
+                                    $"video_bit_rate={bitRate} max_size={maxSize} max_fps={maxFps} cleanup=true";
 
-                cmd = $"CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 scid=00000001 {serverArgs}";
+                cmd = $"CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 {serverArgs}";
 
                 _adb.RunServerWithLogging(cmd);
-                await Task.Delay(500);
+                await Task.Delay(1000);
 
-                _videoStream = (AdbStream)await _adb.OpenTunnel("localabstract:scrcpy_00000001");
-                _controlStream = (AdbStream)await _adb.OpenTunnel("localabstract:scrcpy_00000001");
+                _videoStream = (AdbStream)await _adb.OpenTunnel("localabstract:scrcpy");
+                _controlStream = (AdbStream)await _adb.OpenTunnel("localabstract:scrcpy");
 
                 logCallback?.Invoke("Tunnels open. Reading handshake...");
                 await ReadInitialMetadataAsync();
@@ -76,8 +76,8 @@ namespace uwpscrcpy
             else
             {
                 isUhidMouse = useUhidMouse;
-                string serverArgs = $"log_level=info tunnel_forward=true video=false audio=false " +
-                                    $"control=true send_device_meta=true send_dummy_byte=false";
+                string serverArgs = $"log_level=info tunnel_forward=true video=false audio=false control=true " +
+                                    $"send_dummy_byte=true send_device_meta=true cleanup=true";
                 if (isUhidMouse)
                 {
                     serverArgs += " mouse=uhid";
@@ -102,6 +102,8 @@ namespace uwpscrcpy
 
         private async Task ReadInitialControlsMetadataAsync()
         {
+            await ReadExactAsync(_controlStream, 1);
+
             byte[] nameBuffer = await ReadExactAsync(_controlStream, 64);
             this.DeviceName = Encoding.UTF8.GetString(nameBuffer).Trim('\0');
             this.Width = 720;
@@ -110,6 +112,8 @@ namespace uwpscrcpy
 
         private async Task ReadInitialMetadataAsync()
         {
+            await ReadExactAsync(_videoStream, 1);
+
             byte[] nameBuffer = await ReadExactAsync(_videoStream, 64);
             this.DeviceName = Encoding.UTF8.GetString(nameBuffer).Trim('\0');
 

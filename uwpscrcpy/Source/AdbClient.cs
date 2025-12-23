@@ -31,7 +31,7 @@ namespace uwpscrcpy
         {
             OnLog?.Invoke($"[ADB] Connecting to {ip}:{port}...");
             _tcp = new TcpClient { NoDelay = true };
-            _tcp.ReceiveBufferSize = 128 * 1024;
+            _tcp.ReceiveBufferSize = 1024 * 1024;
 
             await _tcp.ConnectAsync(ip, port);
             _netStream = _tcp.GetStream();

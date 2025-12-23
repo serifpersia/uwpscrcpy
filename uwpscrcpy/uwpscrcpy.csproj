@@ -176,6 +176,12 @@
   <ItemGroup>
     <None Include="uwpscrcpy_TemporaryKey.pfx" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ScrcpyVideoEngine\ScrcpyVideoEngine.vcxproj">
+      <Project>{da62e6eb-25ef-49ec-be43-2f228ec59dae}</Project>
+      <Name>ScrcpyVideoEngine</Name>
+    </ProjectReference>
+  </ItemGroup>
   <PropertyGroup Condition=" '$(VisualStudioVersion)' == '' or '$(VisualStudioVersion)' &lt; '14.0' ">
     <VisualStudioVersion>14.0</VisualStudioVersion>
   </PropertyGroup>

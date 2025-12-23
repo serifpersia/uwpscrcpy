@@ -1,13 +1,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Runtime.InteropServices.WindowsRuntime;
+using System.Runtime.InteropServices.WindowsRuntime; // Required for AsBuffer()
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Foundation;
-using Windows.Media.Core;
-using Windows.Media.MediaProperties;
-using Windows.Media.Playback;
 using Windows.System;
 using Windows.System.Display;
 using Windows.UI.Core;
@@ -16,38 +13,29 @@ using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Input;
 using Windows.UI.Xaml.Media;
+using Windows.Storage.Streams;
+// Add your C++ Component namespace
+using ScrcpyVideoEngine;
 
 namespace uwpscrcpy
 {
     public sealed partial class MainPage : Page
     {
-        private const bool ENABLE_DEBUG_LOGGING = false;
-        private const int POOL_BUFFER_SIZE = 512 * 1024;
+        private const bool ENABLE_DEBUG_LOGGING = true;
+
+        // C++ Video Engine
+        private VideoEngine _videoEngine;
 
         private ScrcpySession _session;
         private CancellationTokenSource _cts;
-        private MediaPlayer _mediaPlayer;
-        private MediaPlayerElement _currentVideoElement;
-        private MediaStreamSource _mss;
-
-        private readonly object _lock = new object();
-        private readonly Queue<MediaStreamSample> _sampleQueue = new Queue<MediaStreamSample>();
-        private MediaStreamSourceSampleRequest _pendingRequest;
-        private MediaStreamSourceSampleRequestDeferral _pendingDeferral;
-
-        private const int TARGET_QUEUE_SIZE = 5;
-        private const int MAX_QUEUE_SIZE = 15;
-
-        private byte[] _cachedConfigData = null;
-        private long _baselinePts = -1;
-        private bool _waitingForKeyFrame = true;
-        private readonly byte[] _headerBuffer = new byte[12];
-        private readonly ConcurrentStack<byte[]> _frameDataPool = new ConcurrentStack<byte[]>();
         private readonly DisplayRequest _displayRequest = new DisplayRequest();
 
+        // Frame reading state
+        private readonly byte[] _headerBuffer = new byte[12];
+        private byte[] _pendingConfig = null;
         private bool _sessionActive = false;
-        private bool _isReconnectDialogShowing = false;
 
+        // Mouse/Input state
         private bool _isUhidMouseMode = false;
         private bool _isLeftMouseButtonDown = false;
         private const byte MOUSE_BUTTON_LEFT = 1 << 0;
@@ -56,19 +44,21 @@ namespace uwpscrcpy
         private bool _isDragging = false;
         private long _lastTapTimestamp = 0;
         private const int DOUBLE_TAP_THRESHOLD_MS = 200;
-
         private double _scrollAccumulatorY = 0;
         private const double SCROLL_SENSITIVITY = 0.025;
-
         private long _lastTouchSendTime = 0;
-        private const int TOUCH_RATE_LIMIT_MS = 33;
-
+        private const int TOUCH_RATE_LIMIT_MS = 16;
         private double _pendingMouseX = 0;
         private double _pendingMouseY = 0;
 
         public MainPage()
         {
             this.InitializeComponent();
+
+            // Initialize C++ Engine
+            _videoEngine = new VideoEngine();
+            _videoEngine.OnDebugLog += (msg) => Log("[CPP] " + msg);
+
             SystemNavigationManager.GetForCurrentView().BackRequested += (s, e) => { if (ApplicationView.GetForCurrentView().IsFullScreenMode) { ExitFullScreen(); e.Handled = true; } };
             Window.Current.CoreWindow.KeyDown += CoreWindow_KeyDown;
         }
@@ -135,11 +125,12 @@ namespace uwpscrcpy
 
         private void Log(string msg)
         {
-            if (!ENABLE_DEBUG_LOGGING && msg.StartsWith("[DEBUG]")) return;
+            // Simple thread-safe logging
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, () =>
             {
-                if (LogBlock.Text.Length > 500) LogBlock.Text = LogBlock.Text.Substring(0, 250);
-                LogBlock.Text = $"[{DateTime.Now:mm:ss}] {msg}\n" + LogBlock.Text;
+                if (LogBlock.Text.Length > 2000) LogBlock.Text = LogBlock.Text.Substring(0, 1000);
+                string time = DateTime.Now.ToString("mm:ss");
+                LogBlock.Text = $"[{time}] {msg}\n" + LogBlock.Text;
             });
         }
 
@@ -147,36 +138,30 @@ namespace uwpscrcpy
         {
             try
             {
+                // 1. Ensure clean state
                 Cleanup();
+
                 _cts = new CancellationTokenSource();
                 _session = new ScrcpySession();
 
+                // 2. Parse Inputs
                 string ip = IpAddressBox.Text;
                 if (!int.TryParse(PortBox.Text, out int port)) port = 5555;
-
                 int.TryParse(BitRateBox.Text, out int mbps);
                 int bitRate = (mbps > 0) ? mbps * 1000000 : 4000000;
-
                 int.TryParse(MaxSizeBox.Text, out int size);
                 int maxSize = size;
-
                 int.TryParse(MaxFpsBox.Text, out int fps);
                 int maxFps = (fps > 0) ? fps : 30;
-
                 bool video = !ControlsOnlyToggle.IsOn;
                 _isUhidMouseMode = UhidMouseToggle.IsOn && !video;
 
                 if (video)
                 {
                     _displayRequest.RequestActive();
-                    _mediaPlayer = new MediaPlayer
-                    {
-                        RealTimePlayback = true,
-                        AutoPlay = true,
-                        AudioCategory = MediaPlayerAudioCategory.Communications
-                    };
                 }
 
+                // 3. Connect via ADB
                 await _session.ConnectAndStartAsync(ip, port, bitRate, maxSize, maxFps, video, _isUhidMouseMode, Log);
 
                 if (_isUhidMouseMode)
@@ -186,14 +171,27 @@ namespace uwpscrcpy
                 }
                 else if (video)
                 {
-                    Log($"Stream: {_session.Width}x{_session.Height} @ {bitRate / 1000000.0:F1}Mbps");
+                    Log($"Connected. Stream: {_session.Width}x{_session.Height}");
+
+                    // 4. Initialize C++ Engine
+                    _videoEngine.Initialize(_session.Width, _session.Height);
+
+                    // IMPORTANT: Pass the SwapChainPanel to the C++ component
+                    _videoEngine.SetPanel(VideoPanel);
+
+                    // Update UI size
+                    VideoPanel.Width = _session.Width;
+                    VideoPanel.Height = _session.Height;
+
+                    // 5. Start Reading Loop
                     _ = Task.Factory.StartNew(() => VideoLoop(_cts.Token), _cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
                 }
                 else
                 {
                     Log($"Controls-Only Mode.");
-                    VideoSurface.Width = 720;
-                    VideoSurface.Height = 1280;
+
+                    VideoPanel.Width = _session.Width;
+                    VideoPanel.Height = _session.Height;
                 }
             }
             catch (Exception ex)
@@ -208,61 +206,27 @@ namespace uwpscrcpy
 
         private void Cleanup()
         {
-            _isUhidMouseMode = false;
-            _isLeftMouseButtonDown = false;
-            _isDragging = false;
-            _lastTapTimestamp = 0;
-            _pointerPositions.Clear();
-            _scrollAccumulatorY = 0;
-            _pendingMouseX = 0;
-            _pendingMouseY = 0;
-            _waitingForKeyFrame = true;
-
             _sessionActive = false;
+            _pendingConfig = null;
 
+            // Stop C++ Engine
+            if (_videoEngine != null)
+            {
+                _videoEngine.Stop();
+            }
+
+            // UI Reset
+            _isUhidMouseMode = false;
             MouseControlContainer.Visibility = Visibility.Collapsed;
             VideoContainer.Visibility = Visibility.Visible;
+            VideoPanel.Width = double.NaN;
+            VideoPanel.Height = double.NaN;
 
             try { _displayRequest.RequestRelease(); } catch { }
 
             _cts?.Cancel();
             _session?.Dispose();
             _session = null;
-
-            if (_currentVideoElement != null)
-            {
-                _currentVideoElement.SetMediaPlayer(null);
-                VideoSurface.Children.Clear();
-                _currentVideoElement = null;
-            }
-
-            if (_mediaPlayer != null)
-            {
-                _mediaPlayer.Dispose();
-                _mediaPlayer = null;
-            }
-
-            VideoSurface.Width = double.NaN;
-            VideoSurface.Height = double.NaN;
-
-            FlushQueue();
-            _cachedConfigData = null;
-            _baselinePts = -1;
-            _mss = null;
-            _frameDataPool.Clear();
-        }
-
-        private byte[] RentFrameBuffer(int requiredSize)
-        {
-            if (requiredSize > POOL_BUFFER_SIZE) return new byte[requiredSize];
-            if (_frameDataPool.TryPop(out byte[] buffer)) return buffer;
-            return new byte[POOL_BUFFER_SIZE];
-        }
-
-        private void ReturnFrameBuffer(byte[] buffer)
-        {
-            if (buffer.Length == POOL_BUFFER_SIZE && _frameDataPool.Count < 15)
-                _frameDataPool.Push(buffer);
         }
 
         private async Task VideoLoop(CancellationToken token)
@@ -274,8 +238,10 @@ namespace uwpscrcpy
 
                 while (!token.IsCancellationRequested)
                 {
+                    // 1. Read Header (12 bytes)
                     if (!await ReadExactAsync(stream, _headerBuffer, 0, 12, token)) break;
 
+                    // 2. Parse Header
                     ulong ptsData = ((ulong)_headerBuffer[0] << 56) | ((ulong)_headerBuffer[1] << 48) |
                                     ((ulong)_headerBuffer[2] << 40) | ((ulong)_headerBuffer[3] << 32) |
                                     ((ulong)_headerBuffer[4] << 24) | ((ulong)_headerBuffer[5] << 16) |
@@ -285,138 +251,76 @@ namespace uwpscrcpy
                                       ((uint)_headerBuffer[10] << 8) | _headerBuffer[11];
 
                     bool isConfig = (ptsData & 0x8000000000000000) != 0;
-                    bool isKey = (ptsData & 0x4000000000000000) != 0;
-                    ulong ptsUs = ptsData & 0x3FFFFFFFFFFFFFFF;
+                    ulong ptsUs = ptsData & 0x3FFFFFFFFFFFFFFF; // Raw PTS
 
+                    // 3. Read Body
+                    byte[] packetData = new byte[packetSize];
+                    if (!await ReadExactAsync(stream, packetData, 0, (int)packetSize, token)) break;
+
+                    // 4. Handle Configuration (SPS/PPS)
                     if (isConfig)
                     {
-                        if (!_sessionActive)
-                        {
-                            var configData = new byte[packetSize];
-                            if (!await ReadExactAsync(stream, configData, 0, (int)packetSize, token)) break;
-                            _cachedConfigData = configData;
-                            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () => InitVideoPlayer(_cachedConfigData));
-                            _waitingForKeyFrame = true;
-                            _sessionActive = true;
-                        }
-                        else
-                        {
-                            var trash = RentFrameBuffer((int)packetSize);
-                            await ReadExactAsync(stream, trash, 0, (int)packetSize, token);
-                            ReturnFrameBuffer(trash);
+                        // Save this configuration to merge with the next Keyframe
+                        _pendingConfig = packetData;
 
-                            _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () => await PromptForReconnect());
+                        if (_sessionActive)
+                        {
+                            // If we receive config mid-stream, the resolution probably changed.
+                            // The C++ engine handles stream changes via MF_E_TRANSFORM_STREAM_CHANGE,
+                            // but we might want to alert the user or restart.
+                            Log("[Info] Config packet received mid-stream (Orientation change?)");
                         }
+
+                        _sessionActive = true;
                         continue;
                     }
 
-                    if (_waitingForKeyFrame && !isKey)
+                    // 5. Prepare Buffer for Engine
+                    IBuffer bufferToSend;
+
+                    if (_pendingConfig != null)
                     {
-                        var trash = RentFrameBuffer((int)packetSize);
-                        await ReadExactAsync(stream, trash, 0, (int)packetSize, token);
-                        ReturnFrameBuffer(trash);
-                        continue;
-                    }
-
-                    int headerOffset = 0;
-                    int totalSize = (int)packetSize;
-
-                    if (isKey && _cachedConfigData != null)
-                    {
-                        headerOffset = _cachedConfigData.Length;
-                        totalSize += headerOffset;
-                    }
-
-                    byte[] decoderBuffer = RentFrameBuffer(totalSize);
-
-                    if (isKey && _cachedConfigData != null)
-                    {
-                        System.Buffer.BlockCopy(_cachedConfigData, 0, decoderBuffer, 0, _cachedConfigData.Length);
-                    }
-
-                    if (!await ReadExactAsync(stream, decoderBuffer, headerOffset, (int)packetSize, token))
-                    {
-                        ReturnFrameBuffer(decoderBuffer);
-                        break;
-                    }
-
-                    if (_waitingForKeyFrame && isKey) _waitingForKeyFrame = false;
-
-                    if (_mss != null)
-                    {
-                        if (_baselinePts == -1) _baselinePts = (long)ptsUs;
-                        long relativeUs = (long)ptsUs - _baselinePts;
-                        if (relativeUs < 0) relativeUs = 0;
-
-                        var sample = MediaStreamSample.CreateFromBuffer(
-                            decoderBuffer.AsBuffer(0, totalSize),
-                            TimeSpan.FromTicks(relativeUs * 10));
-                        sample.KeyFrame = isKey;
-                        sample.Processed += (s, e) => ReturnFrameBuffer(decoderBuffer);
-
-                        lock (_lock)
-                        {
-                            if (_pendingDeferral != null)
-                            {
-                                _pendingRequest.Sample = sample;
-                                _pendingDeferral.Complete();
-                                _pendingRequest = null;
-                                _pendingDeferral = null;
-                            }
-                            else
-                            {
-                                int qSize = _sampleQueue.Count;
-                                if (qSize > MAX_QUEUE_SIZE)
-                                {
-                                    _sampleQueue.Clear();
-                                    _waitingForKeyFrame = true;
-                                    ReturnFrameBuffer(decoderBuffer);
-                                }
-                                else if (qSize > TARGET_QUEUE_SIZE && !isKey)
-                                {
-                                    ReturnFrameBuffer(decoderBuffer);
-                                }
-                                else
-                                {
-                                    _sampleQueue.Enqueue(sample);
-                                }
-                            }
-                        }
+                        // Merge Config + Frame (Critical for DX Hardware Decoder to init)
+                        bufferToSend = MergeBuffer(_pendingConfig, packetData);
+                        _pendingConfig = null; // Clear after use
                     }
                     else
                     {
-                        ReturnFrameBuffer(decoderBuffer);
+                        bufferToSend = packetData.AsBuffer();
                     }
+
+                    // 6. Push to C++ Engine
+                    // Convert raw PTS (microseconds) to what the engine expects.
+                    // The engine sample says: sample->SetSampleTime((packet.pts - m_baselinePts) * 10);
+                    // Pass the raw PTS here, let C++ handle baseline calc.
+                    _videoEngine.PushFrame(bufferToSend, (long)ptsUs);
                 }
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { Log($"Video Err: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Log($"Video Loop Error: {ex.Message}");
+                // Handle disconnect on UI thread
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                {
+                    if (ConnectToggle.IsChecked == true)
+                    {
+                        Cleanup();
+                        ConnectToggle.IsChecked = false;
+                        ConnectToggle.Content = "Start";
+                        SetControlsEnabled(true);
+                    }
+                });
+            }
         }
 
-        private async Task PromptForReconnect()
+        // Helper to combine config (SPS/PPS) with keyframe data
+        private IBuffer MergeBuffer(byte[] config, byte[] frame)
         {
-            if (_isReconnectDialogShowing) return;
-
-            _isReconnectDialogShowing = true;
-
-            var dialog = new ContentDialog
-            {
-                Title = "Resolution Change Detected",
-                Content = "The device's screen orientation or resolution has changed. Would you like to restart the stream to match?",
-                PrimaryButtonText = "Restart",
-                CloseButtonText = "Cancel"
-            };
-
-            ContentDialogResult result = await dialog.ShowAsync();
-
-            if (result == ContentDialogResult.Primary)
-            {
-                Cleanup();
-                await StartConnection();
-                ConnectToggle.IsChecked = true;
-            }
-
-            _isReconnectDialogShowing = false;
+            byte[] combined = new byte[config.Length + frame.Length];
+            System.Buffer.BlockCopy(config, 0, combined, 0, config.Length);
+            System.Buffer.BlockCopy(frame, 0, combined, config.Length, frame.Length);
+            return combined.AsBuffer();
         }
 
         private async Task<bool> ReadExactAsync(AdbStream stream, byte[] buffer, int offset, int count, CancellationToken token)
@@ -431,84 +335,27 @@ namespace uwpscrcpy
             return true;
         }
 
-        private void FlushQueue()
-        {
-            lock (_lock)
-            {
-                _sampleQueue.Clear();
-                if (_pendingDeferral != null)
-                {
-                    _pendingDeferral = null;
-                    _pendingRequest = null;
-                }
-            }
-        }
-
-        private void InitVideoPlayer(byte[] codecPrivateData)
-        {
-            if (_mss != null) return;
-            VideoSurface.Width = _session.Width;
-            VideoSurface.Height = _session.Height;
-
-            _currentVideoElement = new MediaPlayerElement { Stretch = Stretch.Uniform, AutoPlay = true, AreTransportControlsEnabled = false };
-            _currentVideoElement.SetMediaPlayer(_mediaPlayer);
-            VideoSurface.Children.Add(_currentVideoElement);
-
-            var videoProps = VideoEncodingProperties.CreateH264();
-            videoProps.Width = _session.Width;
-            videoProps.Height = _session.Height;
-            videoProps.ProfileId = H264ProfileIds.Main;
-            videoProps.SetFormatUserData(codecPrivateData);
-
-            _mss = new MediaStreamSource(new VideoStreamDescriptor(videoProps))
-            {
-                BufferTime = TimeSpan.Zero,
-                CanSeek = false
-            };
-            _mss.SampleRequested += OnSampleRequested;
-            _mediaPlayer.RealTimePlayback = true;
-            _mediaPlayer.Source = MediaSource.CreateFromMediaStreamSource(_mss);
-        }
-
-        private void OnSampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
-        {
-            lock (_lock)
-            {
-                if (_sampleQueue.Count > 0)
-                {
-                    args.Request.Sample = _sampleQueue.Dequeue();
-                }
-                else
-                {
-                    _pendingRequest = args.Request;
-                    _pendingDeferral = args.Request.GetDeferral();
-                }
-            }
-        }
+        // =============================================================
+        // INPUT HANDLING (Updated to use VideoPanel)
+        // =============================================================
 
         private void VideoSurface_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
             if (_isUhidMouseMode || _session == null) return;
-
-            var properties = e.GetCurrentPoint(VideoSurface).Properties;
-            if (properties.IsRightButtonPressed)
-            {
-                e.Handled = true;
-                return;
-            }
-            _session.SendTouch(0, e, VideoSurface);
+            var properties = e.GetCurrentPoint(VideoPanel).Properties;
+            if (properties.IsRightButtonPressed) { e.Handled = true; return; }
+            _session.SendTouch(0, e, VideoPanel);
         }
 
         private void VideoSurface_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
             if (_isUhidMouseMode) return;
-
             if (e.Pointer.IsInContact)
             {
                 long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (now - _lastTouchSendTime >= TOUCH_RATE_LIMIT_MS)
                 {
-                    _session?.SendTouch(2, e, VideoSurface);
+                    _session?.SendTouch(2, e, VideoPanel);
                     _lastTouchSendTime = now;
                 }
             }
@@ -517,8 +364,7 @@ namespace uwpscrcpy
         private void VideoSurface_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
             if (_isUhidMouseMode || _session == null) return;
-
-            var updateKind = e.GetCurrentPoint(VideoSurface).Properties.PointerUpdateKind;
+            var updateKind = e.GetCurrentPoint(VideoPanel).Properties.PointerUpdateKind;
             if (updateKind == Windows.UI.Input.PointerUpdateKind.RightButtonReleased)
             {
                 _session.SendBackEvent(0);
@@ -526,19 +372,19 @@ namespace uwpscrcpy
                 e.Handled = true;
                 return;
             }
-            _session.SendTouch(1, e, VideoSurface);
+            _session.SendTouch(1, e, VideoPanel);
         }
 
         private void VideoSurface_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
         {
             if (_isUhidMouseMode || _session == null) return;
 
-            var point = e.GetCurrentPoint(VideoSurface);
+            var point = e.GetCurrentPoint(VideoPanel);
             var pos = point.Position;
             var props = point.Properties;
 
-            double actualWidth = VideoSurface.ActualWidth;
-            double actualHeight = VideoSurface.ActualHeight;
+            double actualWidth = VideoPanel.ActualWidth;
+            double actualHeight = VideoPanel.ActualHeight;
 
             double scaleX = (double)_session.Width / actualWidth;
             double scaleY = (double)_session.Height / actualHeight;
@@ -563,34 +409,34 @@ namespace uwpscrcpy
             _session.SendScrollEvent(x, y, 0, vScrollFixed, buttons);
         }
 
+        // =============================================================
+        // UI TOGGLES
+        // =============================================================
+
         private void ControlsOnlyToggle_Toggled(object sender, RoutedEventArgs e)
         {
             if (UhidMouseToggle != null)
             {
                 UhidMouseToggle.IsEnabled = ControlsOnlyToggle.IsOn;
-                if (!ControlsOnlyToggle.IsOn)
-                {
-                    UhidMouseToggle.IsOn = false;
-                }
+                if (!ControlsOnlyToggle.IsOn) UhidMouseToggle.IsOn = false;
             }
         }
 
         private void UhidMouseToggle_Toggled(object sender, RoutedEventArgs e)
         {
-            if (InvertScrollToggle != null)
-            {
-                InvertScrollToggle.IsEnabled = UhidMouseToggle.IsOn;
-            }
+            if (InvertScrollToggle != null) InvertScrollToggle.IsEnabled = UhidMouseToggle.IsOn;
         }
+
+        // =============================================================
+        // UHID MOUSE IMPLEMENTATION (Unchanged from your code)
+        // =============================================================
 
         private void MousePadArea_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
             uint ptrId = e.Pointer.PointerId;
             var pos = e.GetCurrentPoint(MousePadArea).Position;
-            if (!_pointerPositions.ContainsKey(ptrId))
-                _pointerPositions.Add(ptrId, pos);
-            else
-                _pointerPositions[ptrId] = pos;
+            if (!_pointerPositions.ContainsKey(ptrId)) _pointerPositions.Add(ptrId, pos);
+            else _pointerPositions[ptrId] = pos;
 
             if (_pointerPositions.Count == 1)
             {
@@ -601,17 +447,13 @@ namespace uwpscrcpy
                     _session?.SendHidInputEvent(MOUSE_BUTTON_LEFT, new Point(0, 0));
                     _lastTapTimestamp = 0;
                 }
-                else
-                {
-                    _lastTapTimestamp = now;
-                }
+                else _lastTapTimestamp = now;
             }
         }
 
         private void MousePadArea_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
             if (!e.Pointer.IsInContact) return;
-
             uint ptrId = e.Pointer.PointerId;
             var currentPosition = e.GetCurrentPoint(MousePadArea).Position;
 
@@ -622,20 +464,16 @@ namespace uwpscrcpy
             }
 
             double MOUSE_SENSITIVITY = 1.25;
-
             double rawDX = (currentPosition.X - previousPosition.X) * MOUSE_SENSITIVITY;
             double rawDY = (currentPosition.Y - previousPosition.Y) * MOUSE_SENSITIVITY;
-
             _pointerPositions[ptrId] = currentPosition;
 
             if (_pointerPositions.Count == 1)
             {
                 _pendingMouseX += rawDX;
                 _pendingMouseY += rawDY;
-
                 byte buttons = 0;
-                if (_isDragging || _isLeftMouseButtonDown)
-                    buttons |= MOUSE_BUTTON_LEFT;
+                if (_isDragging || _isLeftMouseButtonDown) buttons |= MOUSE_BUTTON_LEFT;
 
                 long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (now - _lastTouchSendTime >= TOUCH_RATE_LIMIT_MS)
@@ -644,9 +482,7 @@ namespace uwpscrcpy
                     {
                         var deltaToSend = new Point(_pendingMouseX, _pendingMouseY);
                         _session?.SendHidInputEvent(buttons, deltaToSend);
-
-                        _pendingMouseX = 0;
-                        _pendingMouseY = 0;
+                        _pendingMouseX = 0; _pendingMouseY = 0;
                         _lastTouchSendTime = now;
                     }
                 }
@@ -655,45 +491,25 @@ namespace uwpscrcpy
             {
                 double rawDeltaY = rawDY * SCROLL_SENSITIVITY;
                 if (Math.Abs(rawDY) < 0.5) rawDeltaY = 0;
-
                 _scrollAccumulatorY += rawDeltaY;
-
                 if (Math.Abs(_scrollAccumulatorY) >= 1.0)
                 {
                     int vScrollToSend = (int)_scrollAccumulatorY;
                     _scrollAccumulatorY -= vScrollToSend;
-
-                    if (InvertScrollToggle.IsOn)
-                        vScrollToSend = -vScrollToSend;
-
+                    if (InvertScrollToggle.IsOn) vScrollToSend = -vScrollToSend;
                     _session?.SendHidInputEvent(0, new Point(0, 0), vScrollToSend, 0);
                 }
             }
         }
 
-        private void MousePadArea_PointerReleased(object sender, PointerRoutedEventArgs e)
-        {
-            CleanupPointer(e.Pointer.PointerId);
-        }
-
-        private void MousePadArea_PointerCanceled(object sender, PointerRoutedEventArgs e)
-        {
-            CleanupPointer(e.Pointer.PointerId);
-        }
-
-        private void MousePadArea_PointerExited(object sender, PointerRoutedEventArgs e)
-        {
-            CleanupPointer(e.Pointer.PointerId);
-        }
+        private void MousePadArea_PointerReleased(object sender, PointerRoutedEventArgs e) => CleanupPointer(e.Pointer.PointerId);
+        private void MousePadArea_PointerCanceled(object sender, PointerRoutedEventArgs e) => CleanupPointer(e.Pointer.PointerId);
+        private void MousePadArea_PointerExited(object sender, PointerRoutedEventArgs e) => CleanupPointer(e.Pointer.PointerId);
 
         private void CleanupPointer(uint ptrId)
         {
-            if (_pointerPositions.ContainsKey(ptrId))
-                _pointerPositions.Remove(ptrId);
-
-            _pendingMouseX = 0;
-            _pendingMouseY = 0;
-
+            if (_pointerPositions.ContainsKey(ptrId)) _pointerPositions.Remove(ptrId);
+            _pendingMouseX = 0; _pendingMouseY = 0;
             if (_isDragging && _pointerPositions.Count == 0)
             {
                 _isDragging = false;
@@ -710,18 +526,10 @@ namespace uwpscrcpy
         private void LeftClickArea_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
             _isLeftMouseButtonDown = false;
-            if (!_isDragging)
-                _session?.SendHidInputEvent(0, new Point(0, 0));
+            if (!_isDragging) _session?.SendHidInputEvent(0, new Point(0, 0));
         }
 
-        private void RightClickArea_PointerPressed(object sender, PointerRoutedEventArgs e)
-        {
-            _session?.SendHidInputEvent(MOUSE_BUTTON_RIGHT, new Point(0, 0));
-        }
-
-        private void RightClickArea_PointerReleased(object sender, PointerRoutedEventArgs e)
-        {
-            _session?.SendHidInputEvent(0, new Point(0, 0));
-        }
+        private void RightClickArea_PointerPressed(object sender, PointerRoutedEventArgs e) => _session?.SendHidInputEvent(MOUSE_BUTTON_RIGHT, new Point(0, 0));
+        private void RightClickArea_PointerReleased(object sender, PointerRoutedEventArgs e) => _session?.SendHidInputEvent(0, new Point(0, 0));
     }
 }
