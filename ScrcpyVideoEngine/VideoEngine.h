@@ -16,9 +16,10 @@
 namespace ScrcpyVideoEngine
 {
 	public delegate void DebugHandler(Platform::String^ message);
+	public delegate void ResolutionChangedHandler(uint32_t newWidth, uint32_t newHeight);
 
 	struct PacketData {
-		std::vector<byte> data;
+		Windows::Storage::Streams::IBuffer^ buffer;
 		int64_t pts;
 	};
 
@@ -32,10 +33,13 @@ namespace ScrcpyVideoEngine
 		void SetPanel(Platform::Object^ panel);
 		void PushFrame(Windows::Storage::Streams::IBuffer^ buf, int64_t raw_pts);
 
+		void ResizeSwapChain(uint32_t newWidth, uint32_t newHeight);
+
 		void Start();
 		void Stop();
 
 		event DebugHandler^ OnDebugLog;
+		event ResolutionChangedHandler^ OnResolutionChanged;
 
 	private:
 		void Log(Platform::String^ msg);

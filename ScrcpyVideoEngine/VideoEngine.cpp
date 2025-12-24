@@ -94,20 +94,32 @@ void VideoEngine::Stop() {
 
 void VideoEngine::PushFrame(IBuffer^ buf, int64_t raw_pts) {
 	if (!buf || buf->Length == 0 || !m_isRunning) return;
-	ComPtr<IUnknown> unk = reinterpret_cast<IUnknown*>(buf);
-	ComPtr<IBufferByteAccess> acc;
-	if (FAILED(unk.As(&acc))) return;
-	byte* rawData;
-	acc->Buffer(&rawData);
+
 	PacketData packet;
 	packet.pts = raw_pts;
-	packet.data.assign(rawData, rawData + buf->Length);
+	packet.buffer = buf;
+
 	{
 		std::lock_guard<std::mutex> lock(m_queueMutex);
 		m_packetQueue.push(packet);
 	}
 	m_queueCv.notify_one();
 }
+
+void VideoEngine::ResizeSwapChain(uint32_t newWidth, uint32_t newHeight) {
+	if (!m_swapChain || !m_d3dContext) return;
+
+	m_d3dContext->OMSetRenderTargets(0, nullptr, nullptr);
+
+	HRESULT hr = m_swapChain->ResizeBuffers(2, newWidth, newHeight, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+	if (FAILED(hr)) {
+		Log("Failed to resize swap chain.");
+	}
+	else {
+		Log("Swap chain resized successfully.");
+	}
+}
+
 
 void VideoEngine::DecoderLoop() {
 	LogWithThread("WORKER", "Thread Loop Start");
@@ -120,15 +132,24 @@ void VideoEngine::DecoderLoop() {
 			packet = m_packetQueue.front();
 			m_packetQueue.pop();
 		}
-		if (!m_decoder || !m_isInitialized) continue;
+		if (!m_decoder || !m_isInitialized || packet.buffer == nullptr) continue;
 		if (m_baselinePts == -1) m_baselinePts = packet.pts;
+
+		ComPtr<IUnknown> unk = reinterpret_cast<IUnknown*>(packet.buffer);
+		ComPtr<IBufferByteAccess> bufferByteAccess;
+		if (FAILED(unk.As(&bufferByteAccess))) continue;
+
+		byte* rawData = nullptr;
+		if (FAILED(bufferByteAccess->Buffer(&rawData))) continue;
+
 		ComPtr<IMFMediaBuffer> mb;
-		MFCreateMemoryBuffer((DWORD)packet.data.size(), &mb);
-		BYTE* dest;
+		MFCreateMemoryBuffer(packet.buffer->Length, &mb);
+		BYTE* dest = nullptr;
 		mb->Lock(&dest, nullptr, nullptr);
-		memcpy(dest, packet.data.data(), packet.data.size());
+		memcpy(dest, rawData, packet.buffer->Length);
 		mb->Unlock();
-		mb->SetCurrentLength((DWORD)packet.data.size());
+		mb->SetCurrentLength(packet.buffer->Length);
+
 		ComPtr<IMFSample> sample;
 		MFCreateSample(&sample);
 		sample->AddBuffer(mb.Get());
@@ -167,10 +188,14 @@ void VideoEngine::ProcessDecodedOutput() {
 				MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
 			}
 
-			m_width = w;
-			m_height = h;
-
-			LogWithThread("DECODER", "Resolution Change");
+			if (m_width != w || m_height != h)
+			{
+				m_width = w;
+				m_height = h;
+				LogWithThread("DECODER", "Resolution Change Detected");
+				try { OnResolutionChanged(m_width, m_height); }
+				catch (...) {}
+			}
 			continue;
 		}
 
@@ -225,7 +250,7 @@ void VideoEngine::RenderFrame(ID3D11Texture2D* decoderTex, UINT subIndex) {
 	HRESULT hr = m_videoContext->VideoProcessorBlt(m_videoProcessor.Get(), outputView.Get(), 0, 1, &stream);
 
 	if (SUCCEEDED(hr)) {
-		m_swapChain->Present(1, 0);
+		m_swapChain->Present(0, 0);
 	}
 }
 

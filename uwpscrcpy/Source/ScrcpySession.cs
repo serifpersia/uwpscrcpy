@@ -133,6 +133,12 @@ namespace uwpscrcpy
             }
         }
 
+        public void UpdateDimensions(uint width, uint height)
+        {
+            this.Width = width;
+            this.Height = height;
+        }
+
         private async Task ReadInitialMetadataAsync()
         {
             byte[] nameBuffer = await ReadExactAsync(_videoStream, 64);
