@@ -9,6 +9,7 @@ using Windows.UI.Core;
 using Windows.UI.ViewManagement;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
+using Windows.UI.Xaml.Input;
 using ScrcpyVideoEngine;
 
 namespace uwpscrcpy
@@ -19,7 +20,6 @@ namespace uwpscrcpy
         private ScrcpySession _session;
         private InputManager _inputManager;
         private CancellationTokenSource _cts;
-
         private readonly DisplayRequest _displayRequest = new DisplayRequest();
         private readonly byte[] _headerBuffer = new byte[12];
         private byte[] _pendingConfig = null;
@@ -29,11 +29,9 @@ namespace uwpscrcpy
         public MainPage()
         {
             this.InitializeComponent();
-
             _videoEngine = new VideoEngine();
             _videoEngine.OnDebugLog += (msg) => Log("[CPP] " + msg);
             _videoEngine.OnResolutionChanged += VideoEngine_OnResolutionChanged;
-
             SystemNavigationManager.GetForCurrentView().BackRequested += (s, e) => { if (ApplicationView.GetForCurrentView().IsFullScreenMode) { ExitFullScreen(); e.Handled = true; } };
             Window.Current.CoreWindow.KeyDown += CoreWindow_KeyDown;
         }
@@ -62,7 +60,20 @@ namespace uwpscrcpy
             }
         }
 
-        private void HamburgerButton_Click(object sender, RoutedEventArgs e) => MainSplitView.IsPaneOpen = !MainSplitView.IsPaneOpen;
+        private async void HamburgerButton_Click(object sender, RoutedEventArgs e)
+        {
+            MainSplitView.IsPaneOpen = !MainSplitView.IsPaneOpen;
+
+            if (MainSplitView.IsPaneOpen && _session != null && ConnectToggle.IsChecked == true)
+            {
+                Log("Refreshing volume level...");
+                int currentVolume = await _session.GetVolumeAsync();
+                if (currentVolume != -1)
+                {
+                    VolumeSlider.Value = currentVolume;
+                }
+            }
+        }
 
         private async void ConnectToggle_Click(object sender, RoutedEventArgs e)
         {
@@ -130,7 +141,6 @@ namespace uwpscrcpy
                 Cleanup();
                 _cts = new CancellationTokenSource();
                 _session = new ScrcpySession();
-
                 string ip = IpAddressBox.Text;
                 if (!int.TryParse(PortBox.Text, out int port)) port = 5555;
                 int.TryParse(BitRateBox.Text, out int mbps);
@@ -141,15 +151,17 @@ namespace uwpscrcpy
                 int maxFps = (fps > 0) ? fps : 30;
                 bool video = !ControlsOnlyToggle.IsOn;
                 _isUhidMouseMode = UhidMouseToggle.IsOn && !video;
-
                 if (video) _displayRequest.RequestActive();
-
                 await _session.ConnectAndStartAsync(ip, port, bitRate, maxSize, maxFps, video, _isUhidMouseMode, Log);
-
                 _inputManager = new InputManager(_session, VideoPanel, MousePadArea, LeftClickArea, RightClickArea, InvertScrollToggle);
                 _inputManager.RegisterInputHandlers();
                 _inputManager.SetUhidMode(_isUhidMouseMode);
-
+                VolumeControlPanel.Visibility = Visibility.Visible;
+                int currentVolume = await _session.GetVolumeAsync();
+                if (currentVolume != -1)
+                {
+                    VolumeSlider.Value = currentVolume;
+                }
                 if (_isUhidMouseMode)
                 {
                     MouseControlContainer.Visibility = Visibility.Visible;
@@ -185,22 +197,27 @@ namespace uwpscrcpy
         {
             _sessionActive = false;
             _pendingConfig = null;
-
             _videoEngine?.Stop();
-
             _inputManager?.UnregisterInputHandlers();
             _inputManager = null;
-
+            VolumeControlPanel.Visibility = Visibility.Collapsed;
+            VolumeSlider.Value = 0;
             MouseControlContainer.Visibility = Visibility.Collapsed;
             VideoContainer.Visibility = Visibility.Visible;
             VideoPanel.Width = double.NaN;
             VideoPanel.Height = double.NaN;
-
             try { _displayRequest.RequestRelease(); } catch { }
-
             _cts?.Cancel();
             _session?.Dispose();
             _session = null;
+        }
+
+        private async void VolumeSlider_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        {
+            if (_session == null) return;
+            int newVolume = (int)VolumeSlider.Value;
+            Log($"Setting device volume to {newVolume}...");
+            await _session.SetVolumeAsync(newVolume);
         }
 
         private async Task VideoLoop(CancellationToken token)
@@ -209,25 +226,19 @@ namespace uwpscrcpy
             {
                 var stream = _session.VideoStream;
                 if (stream == null) return;
-
                 while (!token.IsCancellationRequested)
                 {
                     if (!await ReadExactAsync(stream, _headerBuffer, 0, 12, token)) break;
-
                     ulong ptsData = ((ulong)_headerBuffer[0] << 56) | ((ulong)_headerBuffer[1] << 48) |
                                     ((ulong)_headerBuffer[2] << 40) | ((ulong)_headerBuffer[3] << 32) |
                                     ((ulong)_headerBuffer[4] << 24) | ((ulong)_headerBuffer[5] << 16) |
                                     ((ulong)_headerBuffer[6] << 8) | _headerBuffer[7];
-
                     uint packetSize = ((uint)_headerBuffer[8] << 24) | ((uint)_headerBuffer[9] << 16) |
                                       ((uint)_headerBuffer[10] << 8) | _headerBuffer[11];
-
                     bool isConfig = (ptsData & 0x8000000000000000) != 0;
                     ulong ptsUs = ptsData & 0x3FFFFFFFFFFFFFFF;
-
                     byte[] packetData = new byte[packetSize];
                     if (!await ReadExactAsync(stream, packetData, 0, (int)packetSize, token)) break;
-
                     if (isConfig)
                     {
                         _pendingConfig = packetData;
@@ -235,13 +246,10 @@ namespace uwpscrcpy
                         _sessionActive = true;
                         continue;
                     }
-
                     IBuffer bufferToSend = (_pendingConfig != null)
                         ? MergeBuffer(_pendingConfig, packetData)
                         : packetData.AsBuffer();
-
                     if (_pendingConfig != null) _pendingConfig = null;
-
                     _videoEngine.PushFrame(bufferToSend, (long)ptsUs);
                 }
             }

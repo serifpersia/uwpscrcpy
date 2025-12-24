@@ -8,9 +8,6 @@
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
     mc:Ignorable="d">
 
-    <!-- ========================================================= -->
-    <!-- Page-level resources                                     -->
-    <!-- ========================================================= -->
     <Page.Resources>
         <SolidColorBrush x:Key="PrimaryTextBrush" Color="{ThemeResource SystemBaseHighColor}" />
         <SolidColorBrush x:Key="SecondaryTextBrush" Color="{ThemeResource SystemBaseMediumColor}" />
@@ -22,7 +19,6 @@
         <SolidColorBrush x:Key="VideoPlayerBackgroundBrush" Color="Black" />
     </Page.Resources>
 
-    <!-- Root layout container -->
     <Grid x:Name="RootGrid" Background="{ThemeResource PageBackgroundBrush}">
         <SplitView x:Name="MainSplitView"
                    DisplayMode="Overlay"
@@ -31,14 +27,12 @@
                    PanePlacement="Right"
                    PaneBackground="{ThemeResource PaneBackgroundBrush}">
 
-            <!-- RIGHT SIDE CONTROL PANE -->
             <SplitView.Pane>
                 <Border BorderBrush="{ThemeResource DividerBrush}" BorderThickness="1,0,0,0">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
                         <StackPanel>
                             <TextBlock Text="UWP Scrcpy" FontSize="24" FontWeight="SemiBold" Foreground="{ThemeResource PrimaryTextBrush}" Margin="0,0,0,24"/>
 
-                            <!-- Connection section -->
                             <Border Background="{ThemeResource SurfaceBrush}" Padding="16" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="Connection" FontWeight="SemiBold" Foreground="{ThemeResource PrimaryTextBrush}" Margin="0,0,0,12"/>
@@ -46,7 +40,6 @@
                                 </StackPanel>
                             </Border>
 
-                            <!-- Device settings section -->
                             <Border Background="{ThemeResource SurfaceBrush}" Padding="16" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="Device Settings" FontWeight="SemiBold" Foreground="{ThemeResource PrimaryTextBrush}" Margin="0,0,0,12"/>
@@ -76,7 +69,6 @@
                                 </StackPanel>
                             </Border>
 
-                            <!-- Options section -->
                             <Border Background="{ThemeResource SurfaceBrush}" Padding="16" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="Options" FontWeight="SemiBold" Margin="0,0,0,8"/>
@@ -86,11 +78,27 @@
                                 </StackPanel>
                             </Border>
 
-                            <!-- Actions -->
+                            <Border x:Name="VolumeControlPanel"
+                                    Background="{ThemeResource SurfaceBrush}"
+                                    Padding="16"
+                                    Margin="0,0,0,12"
+                                    Visibility="Collapsed">
+                                <StackPanel>
+                                    <TextBlock Text="Volume"
+                                               FontWeight="SemiBold"
+                                               Foreground="{ThemeResource PrimaryTextBrush}"
+                                               Margin="0,0,0,8"/>
+                                    <Slider x:Name="VolumeSlider"
+                                            Minimum="0"
+                                            Maximum="15"
+                                            Value="0"
+                                            PointerCaptureLost="VolumeSlider_PointerCaptureLost"/>
+                                </StackPanel>
+                            </Border>
+
                             <Button x:Name="FullScreenButton" Content="Fullscreen" Height="40" HorizontalAlignment="Stretch" Click="FullScreenButton_Click" Margin="0,0,0,8"/>
                             <Button Content="Close Menu" Height="40" HorizontalAlignment="Stretch" Click="HamburgerButton_Click"/>
 
-                            <!-- Logs -->
                             <Rectangle Height="1" Fill="{ThemeResource DividerBrush}" Margin="0,24,0,16"/>
                             <TextBlock Text="Logs" Foreground="{ThemeResource SecondaryTextBrush}" Margin="0,0,0,8"/>
                             <TextBox x:Name="LogBlock" Height="150" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" FontSize="11" Foreground="{ThemeResource SecondaryTextBrush}" Background="{ThemeResource SurfaceBrush}" ScrollViewer.VerticalScrollBarVisibility="Auto" BorderThickness="0" Padding="8"/>
@@ -99,10 +107,8 @@
                 </Border>
             </SplitView.Pane>
 
-            <!-- MAIN CONTENT AREA -->
             <SplitView.Content>
                 <Grid x:Name="ContentGrid" Background="{ThemeResource PageBackgroundBrush}">
-                    <!-- Video container (always black) -->
                     <Grid x:Name="VideoContainer" Background="{ThemeResource VideoPlayerBackgroundBrush}">
                         <Viewbox Stretch="Uniform">
                             <SwapChainPanel x:Name="VideoPanel">
@@ -111,7 +117,6 @@
                         </Viewbox>
                     </Grid>
 
-                    <!-- Mouse / touchpad controls -->
                     <Grid x:Name="MouseControlContainer" Background="Black" Visibility="Collapsed">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*" />
@@ -128,7 +133,6 @@
                         </Grid>
                     </Grid>
 
-                    <!-- Hamburger menu button -->
                     <StackPanel VerticalAlignment="Top" HorizontalAlignment="Right" Margin="0,12,12,0">
                         <Button x:Name="HamburgerButton" Width="44" Height="44" Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}" Foreground="{ThemeResource PrimaryTextBrush}" Click="HamburgerButton_Click">
                             <FontIcon Glyph="&#xE700;" FontFamily="Segoe MDL2 Assets"/>
