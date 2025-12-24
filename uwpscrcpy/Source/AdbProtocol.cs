@@ -42,20 +42,25 @@ namespace uwpscrcpy
             public uint DataLength;
             public byte[] Payload;
 
-            public static AdbPacket Parse(Stream stream, byte[] headerBuffer)
+            public static unsafe AdbPacket Parse(Stream stream, byte[] headerBuffer)
             {
                 ReadExact(stream, headerBuffer, 24);
 
                 var pkt = new AdbPacket();
-                pkt.Command = BitConverter.ToUInt32(headerBuffer, 0);
-                pkt.Arg0 = BitConverter.ToUInt32(headerBuffer, 4);
-                pkt.Arg1 = BitConverter.ToUInt32(headerBuffer, 8);
-                pkt.DataLength = BitConverter.ToUInt32(headerBuffer, 12);
-                uint crc = BitConverter.ToUInt32(headerBuffer, 16);
-                uint magic = BitConverter.ToUInt32(headerBuffer, 20);
 
-                if (pkt.Command != (magic ^ 0xFFFFFFFF))
-                    throw new Exception("Invalid Magic");
+                fixed (byte* ptr = headerBuffer)
+                {
+                    uint* uptr = (uint*)ptr;
+                    pkt.Command = *uptr;
+                    pkt.Arg0 = *(uptr + 1);
+                    pkt.Arg1 = *(uptr + 2);
+                    pkt.DataLength = *(uptr + 3);
+                    uint crc = *(uptr + 4);
+                    uint magic = *(uptr + 5);
+
+                    if (pkt.Command != (magic ^ 0xFFFFFFFF))
+                        throw new Exception("Invalid Magic");
+                }
 
                 if (pkt.DataLength > 0)
                 {

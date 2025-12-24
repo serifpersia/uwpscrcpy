@@ -8,6 +8,8 @@ using Windows.UI.Xaml.Input;
 using Windows.UI.Xaml;
 using System.Text;
 using Windows.Foundation;
+using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 
 namespace uwpscrcpy
 {
@@ -17,23 +19,21 @@ namespace uwpscrcpy
         private AdbCrypto _crypto;
         private AdbStream _videoStream;
         private AdbStream _controlStream;
-
         public string DeviceName { get; private set; } = "Unknown";
         public uint Width { get; private set; }
         public uint Height { get; private set; }
         public AdbStream VideoStream => _videoStream;
-
         private bool isUhidMouse = false;
-
+        private BlockingCollection<AdbStream> _incomingQueue = new BlockingCollection<AdbStream>();
+        private string _expectedReversePort;
+        private string _activeScid;
         private const byte SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT = 2;
         private const byte SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT = 3;
         private const byte SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON = 4;
         private const byte SC_CONTROL_MSG_TYPE_UHID_CREATE = 12;
         private const byte SC_CONTROL_MSG_TYPE_UHID_INPUT = 13;
         private const byte SC_CONTROL_MSG_TYPE_UHID_DESTROY = 14;
-
         private const ushort SC_HID_ID_MOUSE = 2;
-
         private static readonly byte[] SC_HID_MOUSE_REPORT_DESC = {
             0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05,
             0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05,
@@ -44,60 +44,124 @@ namespace uwpscrcpy
             0xC0,
         };
 
-        public ScrcpySession() { _crypto = new AdbCrypto(); _adb = new AdbClient(); }
+        public ScrcpySession()
+        {
+            _crypto = new AdbCrypto();
+            _adb = new AdbClient();
+            _adb.OnIncomingConnection += OnIncomingConnection;
+        }
+
+        private void OnIncomingConnection(AdbStream stream, string destination)
+        {
+            if (!string.IsNullOrEmpty(_expectedReversePort) && destination == _expectedReversePort)
+            {
+                _incomingQueue.Add(stream);
+            }
+        }
+
+        private string GenerateScid()
+        {
+            var rnd = new Random();
+            int val = rnd.Next(0, 0x7FFFFFFF);
+            return val.ToString("x8");
+        }
 
         public async Task ConnectAndStartAsync(string ip, int port, int bitRate, int maxSize, int maxFps, bool video, bool useUhidMouse, Action<string> logCallback)
         {
             logCallback?.Invoke($"Connecting to {ip}:{port}...");
             await _adb.Connect(ip, port, _crypto);
-
+            logCallback?.Invoke("Cleaning old reverse tunnels...");
+            await _adb.RemoveAllReverseForwards();
             logCallback?.Invoke("Deploying server...");
             string jar64 = GetJarBase64();
             await _adb.DeployServer(jar64);
-
+            _activeScid = GenerateScid();
+            int reversePort = 27183;
+            _expectedReversePort = $"tcp:{reversePort}";
+            logCallback?.Invoke($"Setting up reverse tunnel (SCID: {_activeScid})...");
+            await _adb.EnableReverseForward($"localabstract:scrcpy_{_activeScid}", _expectedReversePort);
+            while (_incomingQueue.TryTake(out _)) { }
             string cmd;
             if (video)
             {
-                string serverArgs = $"log_level=info tunnel_forward=true audio=false send_dummy_byte=false " +
-                                    $"send_device_meta=true send_codec_meta=true video=true control=true " +
-                                    $"video_bit_rate={bitRate} max_size={maxSize} max_fps={maxFps}";
-
-                cmd = $"CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 scid=00000001 {serverArgs}";
-
+                string serverArgs = $"log_level=info scid={_activeScid} tunnel_forward=false video=true audio=false control=true " +
+                                    $"send_device_meta=true send_codec_meta=true " +
+                                    $"video_bit_rate={bitRate} max_size={maxSize} max_fps={maxFps} cleanup=true";
+                cmd = $"CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 {serverArgs}";
+                logCallback?.Invoke("Starting server...");
                 _adb.RunServerWithLogging(cmd);
-                await Task.Delay(500);
-
-                _videoStream = (AdbStream)await _adb.OpenTunnel("localabstract:scrcpy_00000001");
-                _controlStream = (AdbStream)await _adb.OpenTunnel("localabstract:scrcpy_00000001");
-
-                logCallback?.Invoke("Tunnels open. Reading handshake...");
+                logCallback?.Invoke("Waiting for Video stream...");
+                _videoStream = await Task.Run(() => _incomingQueue.Take());
+                logCallback?.Invoke("Video stream accepted.");
+                logCallback?.Invoke("Waiting for Control stream...");
+                _controlStream = await Task.Run(() => _incomingQueue.Take());
+                logCallback?.Invoke("Control stream accepted.");
+                logCallback?.Invoke("Reading metadata...");
                 await ReadInitialMetadataAsync();
             }
             else
             {
                 isUhidMouse = useUhidMouse;
-                string serverArgs = $"log_level=info tunnel_forward=true video=false audio=false " +
-                                    $"control=true send_device_meta=true send_dummy_byte=false";
-                if (isUhidMouse)
-                {
-                    serverArgs += " mouse=uhid";
-                    logCallback?.Invoke("UHID Mouse mode enabled.");
-                }
-
-                cmd = $"CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 scid=00000001 {serverArgs}";
-
+                string serverArgs = $"log_level=info scid={_activeScid} tunnel_forward=false video=false audio=false control=true " +
+                                    $"send_device_meta=true cleanup=true";
+                if (isUhidMouse) serverArgs += " mouse=uhid";
+                cmd = $"CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 {serverArgs}";
                 _adb.RunServerWithLogging(cmd);
-                await Task.Delay(500);
-
-                _controlStream = (AdbStream)await _adb.OpenTunnel("localabstract:scrcpy_00000001");
-                logCallback?.Invoke("Tunnel open. Reading handshake...");
+                logCallback?.Invoke("Waiting for Control stream...");
+                _controlStream = await Task.Run(() => _incomingQueue.Take());
                 await ReadInitialControlsMetadataAsync();
+                if (isUhidMouse) SendHidCreateMouse();
+            }
+        }
 
-                if (isUhidMouse)
+        public async Task<int> GetVolumeAsync()
+        {
+            try
+            {
+                string volumeResult = await _adb.ExecuteShell("media volume --get");
+                if (string.IsNullOrWhiteSpace(volumeResult))
+                    return -1;
+
+                var match = Regex.Match(volumeResult, @"volume is (\d+) in range \[\d+\.\.\d+\]");
+                if (match.Success && int.TryParse(match.Groups[1].Value, out int currentVolume))
                 {
-                    SendHidCreateMouse();
+                    return currentVolume;
                 }
             }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Volume Error] Failed to get volume: {ex.Message}");
+            }
+
+            return -1;
+        }
+
+        public async Task SetVolumeAsync(int volume)
+        {
+            try
+            {
+                string command = $"media volume --stream 3 --set {volume}";
+                await _adb.ExecuteShell(command);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Volume Error] Failed to set volume: {ex.Message}");
+            }
+        }
+
+        public void UpdateDimensions(uint width, uint height)
+        {
+            this.Width = width;
+            this.Height = height;
+        }
+
+        private async Task ReadInitialMetadataAsync()
+        {
+            byte[] nameBuffer = await ReadExactAsync(_videoStream, 64);
+            this.DeviceName = Encoding.UTF8.GetString(nameBuffer).Trim('\0');
+            byte[] metaBuffer = await ReadExactAsync(_videoStream, 12);
+            this.Width = ((uint)metaBuffer[4] << 24) | ((uint)metaBuffer[5] << 16) | ((uint)metaBuffer[6] << 8) | metaBuffer[7];
+            this.Height = ((uint)metaBuffer[8] << 24) | ((uint)metaBuffer[9] << 16) | ((uint)metaBuffer[10] << 8) | metaBuffer[11];
         }
 
         private async Task ReadInitialControlsMetadataAsync()
@@ -108,44 +172,33 @@ namespace uwpscrcpy
             this.Height = 1280;
         }
 
-        private async Task ReadInitialMetadataAsync()
-        {
-            byte[] nameBuffer = await ReadExactAsync(_videoStream, 64);
-            this.DeviceName = Encoding.UTF8.GetString(nameBuffer).Trim('\0');
-
-            await ReadExactAsync(_videoStream, 4);
-            byte[] w = await ReadExactAsync(_videoStream, 4);
-            this.Width = ((uint)w[0] << 24) | ((uint)w[1] << 16) | ((uint)w[2] << 8) | w[3];
-            byte[] h = await ReadExactAsync(_videoStream, 4);
-            this.Height = ((uint)h[0] << 24) | ((uint)h[1] << 16) | ((uint)h[2] << 8) | h[3];
-        }
-
         private async Task<byte[]> ReadExactAsync(AdbStream stream, int count)
         {
             byte[] buffer = new byte[count];
             int offset = 0;
-            while (offset < count) { int read = await stream.ReadAsync(buffer, offset, count - offset, CancellationToken.None); if (read == 0) throw new EndOfStreamException(); offset += read; }
+            while (offset < count)
+            {
+                int read = await stream.ReadAsync(buffer, offset, count - offset, CancellationToken.None);
+                if (read == 0) throw new EndOfStreamException();
+                offset += read;
+            }
             return buffer;
         }
 
         public void SendTouch(byte action, PointerRoutedEventArgs e, FrameworkElement relativeTo)
         {
             if (_controlStream == null || Width == 0 || Height == 0) return;
-
             var pos = e.GetCurrentPoint(relativeTo).Position;
             double actualWidth = relativeTo.ActualWidth;
             double actualHeight = relativeTo.ActualHeight;
-
             Task.Run(async () =>
             {
                 try
                 {
                     double scaleX = (double)Width / actualWidth;
                     double scaleY = (double)Height / actualHeight;
-
                     int x = Math.Max(0, Math.Min((int)Width, (int)(pos.X * scaleX)));
                     int y = Math.Max(0, Math.Min((int)Height, (int)(pos.Y * scaleY)));
-
                     byte[] p = new byte[32];
                     p[0] = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
                     p[1] = action;
@@ -156,7 +209,6 @@ namespace uwpscrcpy
                     WriteUInt16BE(p, 20, (ushort)Height);
                     p[22] = 0xFF; p[23] = 0xFF;
                     WriteInt32BE(p, 24, 1);
-
                     await _controlStream.WriteAsync(p, 0, 32, CancellationToken.None);
                 }
                 catch (Exception ex) { Debug.WriteLine($"[Touch Error] {ex.Message}"); }
@@ -166,7 +218,6 @@ namespace uwpscrcpy
         public void SendScrollEvent(int x, int y, short hScroll, short vScroll, int buttons)
         {
             if (_controlStream == null || Width == 0 || Height == 0) return;
-
             Task.Run(async () =>
             {
                 try
@@ -181,7 +232,6 @@ namespace uwpscrcpy
                     WriteInt16BE(p, offset, hScroll); offset += 2;
                     WriteInt16BE(p, offset, vScroll); offset += 2;
                     WriteInt32BE(p, offset, buttons);
-
                     await _controlStream.WriteAsync(p, 0, p.Length, CancellationToken.None);
                 }
                 catch (Exception ex) { Debug.WriteLine($"[Scroll Error] {ex.Message}"); }
@@ -239,14 +289,12 @@ namespace uwpscrcpy
                     hidReport[2] = (byte)(sbyte)Math.Max(-127, Math.Min(127, (int)delta.Y));
                     hidReport[3] = (byte)(sbyte)Math.Max(-127, Math.Min(127, vScroll));
                     hidReport[4] = (byte)(sbyte)Math.Max(-127, Math.Min(127, hScroll));
-
                     byte[] fullMessage = new byte[1 + 2 + 2 + hidReport.Length];
                     int offset = 0;
                     fullMessage[offset++] = SC_CONTROL_MSG_TYPE_UHID_INPUT;
                     offset += WriteUInt16BE(fullMessage, offset, SC_HID_ID_MOUSE);
                     offset += WriteUInt16BE(fullMessage, offset, (ushort)hidReport.Length);
                     Array.Copy(hidReport, 0, fullMessage, offset, hidReport.Length);
-
                     await _controlStream.WriteAsync(fullMessage, 0, fullMessage.Length, CancellationToken.None);
                 }
                 catch (Exception ex) { Debug.WriteLine($"[HID Input Error] {ex.Message}"); }
@@ -294,9 +342,7 @@ namespace uwpscrcpy
 
         private string GetJarBase64()
         {
-            using (var s = typeof(ScrcpySession).GetTypeInfo()
-                                             .Assembly
-                                             .GetManifestResourceStream("uwpscrcpy.Vendor.scrcpy-server.jar"))
+            using (var s = typeof(ScrcpySession).GetTypeInfo().Assembly.GetManifestResourceStream("uwpscrcpy.Vendor.scrcpy-server.jar"))
             {
                 if (s == null)
                     throw new Exception("scrcpy-server.jar not found.");
@@ -308,6 +354,12 @@ namespace uwpscrcpy
 
         public void Dispose()
         {
+            if (_adb != null && _adb.IsConnected && !string.IsNullOrEmpty(_activeScid))
+            {
+                var cleanupTask = _adb.RemoveReverseForward($"localabstract:scrcpy_{_activeScid}");
+                Task.WaitAny(cleanupTask, Task.Delay(50));
+            }
+            if (_adb != null) _adb.OnIncomingConnection -= OnIncomingConnection;
             if (isUhidMouse) SendHidDestroyMouse();
             _videoStream?.Dispose();
             _controlStream?.Dispose();

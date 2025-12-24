@@ -5,6 +5,8 @@ VisualStudioVersion = 15.0.36617.4
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "uwpscrcpy", "uwpscrcpy\uwpscrcpy.csproj", "{6ECE7020-9388-46CE-A677-8F4E02B0360C}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ScrcpyVideoEngine", "ScrcpyVideoEngine\ScrcpyVideoEngine.vcxproj", "{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|ARM = Debug|ARM
@@ -41,6 +43,22 @@ Global
 		{6ECE7020-9388-46CE-A677-8F4E02B0360C}.Release|x86.ActiveCfg = Release|x86
 		{6ECE7020-9388-46CE-A677-8F4E02B0360C}.Release|x86.Build.0 = Release|x86
 		{6ECE7020-9388-46CE-A677-8F4E02B0360C}.Release|x86.Deploy.0 = Release|x86
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|ARM.ActiveCfg = Debug|ARM
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|ARM.Build.0 = Debug|ARM
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|ARM64.Build.0 = Debug|ARM64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|x64.ActiveCfg = Debug|x64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|x64.Build.0 = Debug|x64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|x86.ActiveCfg = Debug|Win32
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Debug|x86.Build.0 = Debug|Win32
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|ARM.ActiveCfg = Release|ARM
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|ARM.Build.0 = Release|ARM
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|ARM64.ActiveCfg = Release|ARM64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|ARM64.Build.0 = Release|ARM64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|x64.ActiveCfg = Release|x64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|x64.Build.0 = Release|x64
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|x86.ActiveCfg = Release|Win32
+		{DA62E6EB-25EF-49EC-BE43-2F228EC59DAE}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

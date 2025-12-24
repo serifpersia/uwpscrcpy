@@ -26,12 +26,13 @@ namespace uwpscrcpy
         private readonly ConcurrentDictionary<uint, TaskCompletionSource<AdbStream>> _pendingOpens = new ConcurrentDictionary<uint, TaskCompletionSource<AdbStream>>();
 
         public event Action<string> OnLog;
+        public event Action<AdbStream, string> OnIncomingConnection;
 
         public async Task Connect(string ip, int port, AdbCrypto crypto)
         {
             OnLog?.Invoke($"[ADB] Connecting to {ip}:{port}...");
             _tcp = new TcpClient { NoDelay = true };
-            _tcp.ReceiveBufferSize = 128 * 1024;
+            _tcp.ReceiveBufferSize = 1024 * 1024;
 
             await _tcp.ConnectAsync(ip, port);
             _netStream = _tcp.GetStream();
@@ -82,13 +83,29 @@ namespace uwpscrcpy
                             SendPacketInternal(AdbProtocol.A_OKAY, pkt.Arg1, pkt.Arg0, null);
                             if (_activeStreams.TryRemove(pkt.Arg1, out var stream)) stream.SignalClose();
                         }
+                        else if (pkt.IsCommand(AdbProtocol.A_OPEN))
+                        {
+                            uint remoteId = pkt.Arg0;
+                            uint localId = (uint)Interlocked.Increment(ref _idCounter);
+
+                            string destination = string.Empty;
+                            if (pkt.DataLength > 0)
+                            {
+                                destination = Encoding.UTF8.GetString(pkt.Payload, 0, (int)pkt.DataLength - 1);
+                            }
+
+                            var stream = new AdbStream(this, localId, remoteId);
+                            if (_activeStreams.TryAdd(localId, stream))
+                            {
+                                SendPacketInternal(AdbProtocol.A_OKAY, localId, remoteId, null);
+                                OnIncomingConnection?.Invoke(stream, destination);
+                            }
+                        }
                         else if (pkt.IsCommand(AdbProtocol.A_AUTH))
                         {
                             if (pkt.Arg0 == 1)
                             {
-
                                 byte[] token = new byte[pkt.DataLength];
-
                                 Array.Copy(pkt.Payload, 0, token, 0, (int)pkt.DataLength);
 
                                 if (_hasSentSignature)
@@ -146,6 +163,51 @@ namespace uwpscrcpy
             }
 
             return await tcs.Task;
+        }
+
+        public async Task EnableReverseForward(string remoteAbstract, string localTcp)
+        {
+            string command = $"reverse:forward:{remoteAbstract};{localTcp}";
+            try
+            {
+                using (var stream = await OpenTunnel(command))
+                {
+                    byte[] response = new byte[64];
+                    await stream.ReadAsync(response, 0, response.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"[ADB] Failed to set reverse tunnel: {ex.Message}");
+                throw;
+            }
+        }
+
+        public async Task RemoveReverseForward(string remoteAbstract)
+        {
+            string command = $"reverse:killforward:{remoteAbstract}";
+            try
+            {
+                using (var stream = await OpenTunnel(command))
+                {
+                    byte[] response = new byte[64];
+                    await stream.ReadAsync(response, 0, response.Length);
+                }
+            }
+            catch { }
+        }
+
+        public async Task RemoveAllReverseForwards()
+        {
+            try
+            {
+                using (var stream = await OpenTunnel("reverse:killforward-all"))
+                {
+                    byte[] response = new byte[64];
+                    await stream.ReadAsync(response, 0, response.Length);
+                }
+            }
+            catch { }
         }
 
         public async Task<string> ExecuteShell(string cmd)
