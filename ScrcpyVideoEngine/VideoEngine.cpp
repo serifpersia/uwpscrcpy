@@ -5,11 +5,13 @@
 #include <codecapi.h>
 #include <string>
 #include <sstream>
+#include <windows.ui.core.h> // Include for CoreDispatcher
 
 using namespace ScrcpyVideoEngine;
 using namespace Platform;
 using namespace Microsoft::WRL;
 using namespace Windows::Storage::Streams;
+using namespace Windows::UI::Core;
 
 const GUID CLSID_CMSH264DecoderMFT_Local = { 0x62CE7E72, 0x4C71, 0x4d20, { 0xB1, 0x5D, 0x45, 0x28, 0x31, 0xA8, 0x7D, 0x9D } };
 const GUID CODECAPI_AVLowLatencyMode_Local = { 0x9c27fa99, 0x6272, 0x4dc5, { 0x9c, 0x9b, 0xb9, 0x29, 0x18, 0x8d, 0x48, 0x2a } };
@@ -18,12 +20,19 @@ VideoEngine::VideoEngine() {
 	MFStartup(MF_VERSION);
 	m_isRunning = false;
 	m_isInitialized = false;
+	m_dispatcher = nullptr; // Initialize to null
 }
 
 VideoEngine::~VideoEngine() {
 	Stop();
 	MFShutdown();
 }
+
+// --- NEW METHOD IMPLEMENTATION ---
+void VideoEngine::SetDispatcher(CoreDispatcher^ dispatcher) {
+	m_dispatcher = dispatcher;
+}
+
 
 void VideoEngine::Log(String^ msg) {
 	LogWithThread("INFO", msg);
@@ -242,15 +251,23 @@ void VideoEngine::RenderFrame(ID3D11Texture2D* decoderTex, UINT subIndex) {
 	stream.Enable = TRUE;
 	stream.pInputSurface = inputView.Get();
 
-
 	RECT sourceRect = { 0, 0, (LONG)m_width, (LONG)m_height };
 	m_videoContext->VideoProcessorSetStreamSourceRect(m_videoProcessor.Get(), 0, TRUE, &sourceRect);
 	m_videoContext->VideoProcessorSetStreamDestRect(m_videoProcessor.Get(), 0, FALSE, nullptr);
 
+	// This part does the heavy lifting and is safe on the background thread.
 	HRESULT hr = m_videoContext->VideoProcessorBlt(m_videoProcessor.Get(), outputView.Get(), 0, 1, &stream);
 
 	if (SUCCEEDED(hr)) {
-		m_swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+		// --- CRITICAL CHANGE ---
+		// The Present() call must happen on the UI thread.
+		// We use the dispatcher we saved earlier to make that happen.
+		if (m_dispatcher != nullptr) {
+			// This lambda function will be executed on the UI thread.
+			m_dispatcher->RunAsync(CoreDispatcherPriority::Normal, ref new DispatchedHandler([this]() {
+				if (m_swapChain) m_swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
+			}));
+		}
 	}
 }
 
