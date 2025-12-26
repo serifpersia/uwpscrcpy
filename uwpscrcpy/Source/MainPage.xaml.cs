@@ -1,14 +1,13 @@
 using System;
-using System.Runtime.InteropServices.WindowsRuntime;
-using System.Threading;
+using System.Reflection;
 using System.Threading.Tasks;
-using Windows.Storage.Streams;
 using Windows.System;
 using Windows.System.Display;
 using Windows.UI.Core;
 using Windows.UI.ViewManagement;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
+using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Input;
 using ScrcpyVideoEngine;
 
@@ -16,100 +15,166 @@ namespace uwpscrcpy
 {
     public sealed partial class MainPage : Page
     {
-        private VideoEngine _videoEngine;
-        private ScrcpySession _session;
+        private readonly ScrcpyController _controller;
+        private readonly AdbCrypto _crypto;
         private InputManager _inputManager;
-        private CancellationTokenSource _cts;
         private readonly DisplayRequest _displayRequest = new DisplayRequest();
-        private readonly byte[] _headerBuffer = new byte[12];
-        private byte[] _pendingConfig = null;
-        private bool _sessionActive = false;
-        private bool _isUhidMouseMode = false;
 
         public MainPage()
         {
             this.InitializeComponent();
-            _videoEngine = new VideoEngine();
-            _videoEngine.OnDebugLog += (msg) => Log("[CPP] " + msg);
-            _videoEngine.OnResolutionChanged += VideoEngine_OnResolutionChanged;
-            SystemNavigationManager.GetForCurrentView().BackRequested += (s, e) => { if (ApplicationView.GetForCurrentView().IsFullScreenMode) { ExitFullScreen(); e.Handled = true; } };
+            _crypto = new AdbCrypto();
+            _controller = new ScrcpyController();
+            _controller.SetDispatcher(Window.Current.CoreWindow.Dispatcher);
+            _controller.OnLog += (msg) => Log(msg);
+            _controller.OnResolutionChanged += Controller_OnResolutionChanged;
+            SystemNavigationManager.GetForCurrentView().BackRequested += MainPage_BackRequested;
             Window.Current.CoreWindow.KeyDown += CoreWindow_KeyDown;
         }
 
-        private async void VideoEngine_OnResolutionChanged(uint newWidth, uint newHeight)
+        private void Controller_OnResolutionChanged(uint newWidth, uint newHeight)
         {
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                Log($"Resolution changed to: {newWidth}x{newHeight}");
-                if (_session != null)
-                {
-                    _session.UpdateDimensions(newWidth, newHeight);
-                    VideoPanel.Width = newWidth;
-                    VideoPanel.Height = newHeight;
-                    _videoEngine.ResizeSwapChain(newWidth, newHeight);
-                }
+                Log($"Resolution received: {newWidth}x{newHeight}. Updating video subsystem...");
+                _controller.InitializeVideo(newWidth, newHeight);
+                VideoPanel.Width = newWidth;
+                VideoPanel.Height = newHeight;
             });
-        }
-
-        private void CoreWindow_KeyDown(CoreWindow sender, KeyEventArgs args)
-        {
-            if (args.VirtualKey == VirtualKey.Escape && ApplicationView.GetForCurrentView().IsFullScreenMode)
-            {
-                ExitFullScreen();
-                args.Handled = true;
-            }
-        }
-
-        private async void HamburgerButton_Click(object sender, RoutedEventArgs e)
-        {
-            MainSplitView.IsPaneOpen = !MainSplitView.IsPaneOpen;
-
-            if (MainSplitView.IsPaneOpen && _session != null && ConnectToggle.IsChecked == true)
-            {
-                Log("Refreshing volume level...");
-                int currentVolume = await _session.GetVolumeAsync();
-                if (currentVolume != -1)
-                {
-                    VolumeSlider.Value = currentVolume;
-                }
-            }
         }
 
         private async void ConnectToggle_Click(object sender, RoutedEventArgs e)
         {
-            if (ConnectToggle.IsChecked == true)
+            var button = (ToggleButton)sender;
+            if (button.IsChecked == true)
             {
-                ConnectToggle.Content = "Stop";
+                button.Content = "Connecting...";
                 SetControlsEnabled(false);
-                await StartConnection();
+                bool success = await StartConnectionAsync();
+                if (success)
+                {
+                    button.Content = "Stop";
+                }
+                else
+                {
+                    button.Content = "Start";
+                    button.IsChecked = false;
+                    SetControlsEnabled(true);
+                }
             }
             else
             {
-                ConnectToggle.Content = "Start";
-                Cleanup();
+                button.Content = "Start";
+                await StopConnectionAsync();
                 SetControlsEnabled(true);
             }
         }
 
-        private void FullScreenButton_Click(object sender, RoutedEventArgs e)
+        private async Task<bool> StartConnectionAsync()
         {
-            if (ApplicationView.GetForCurrentView().IsFullScreenMode)
-                ExitFullScreen();
+            try
+            {
+                string ip = IpAddressBox.Text;
+                int port = int.Parse(PortBox.Text);
+                int.TryParse(BitRateBox.Text, out int mbps);
+                int bitRate = (mbps > 0) ? mbps * 1000000 : 8000000;
+                int.TryParse(MaxSizeBox.Text, out int maxSize);
+                int.TryParse(MaxFpsBox.Text, out int maxFps);
+                byte[] jarBytes = GetJarBytes();
+
+                bool isControlsOnly = ControlsOnlyToggle.IsOn;
+                bool isVideoEnabled = !isControlsOnly;
+                bool isUhidEnabled = isControlsOnly;
+
+                _controller.AuthSignCallback = (token) => _crypto.Sign(token);
+                _controller.AuthKeyCallback = () => _crypto.GetPublicKeyBlob();
+                _controller.SetPanel(VideoPanel);
+
+                VideoPanel.HorizontalAlignment = HorizontalAlignment.Stretch;
+                VideoPanel.VerticalAlignment = VerticalAlignment.Stretch;
+
+                await Task.Run(() =>
+                {
+                    Log("Connecting to ADB...");
+                    if (!_controller.Connect(ip, port)) throw new Exception("ADB Fail");
+                    Log("Deploying server...");
+                    _controller.DeployServer(jarBytes);
+                    Log($"Starting scrcpy (Video: {isVideoEnabled}, UHID: {isUhidEnabled})...");
+                    _controller.StartScrcpy(bitRate, maxSize, maxFps, isVideoEnabled, isUhidEnabled);
+                });
+
+                _inputManager = new InputManager(_controller, VideoPanel, MousePadArea, LeftClickArea, RightClickArea, InvertScrollToggle);
+                _inputManager.RegisterInputHandlers();
+                _inputManager.SetUhidMode(isUhidEnabled);
+
+                if (isControlsOnly)
+                {
+                    VideoPanel.Width = double.NaN;
+                    VideoPanel.Height = double.NaN;
+                    Log("Controls Only (UHID) Active.");
+                }
+
+                UpdateInterfaceLayout();
+                VolumeControlPanel.Visibility = Visibility.Visible;
+                _displayRequest.RequestActive();
+
+                int currentVol = await _controller.GetVolumeAsync();
+                if (currentVol != -1) VolumeSlider.Value = currentVol;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Error: {ex.Message}");
+                await StopConnectionAsync();
+                return false;
+            }
+        }
+
+        private async Task StopConnectionAsync()
+        {
+            Log("Stopping connection...");
+            _displayRequest.RequestRelease();
+
+            if (_inputManager != null)
+            {
+                _inputManager.UnregisterInputHandlers();
+                _inputManager = null;
+            }
+
+            await Task.Run(() => { _controller?.Stop(); });
+
+            VolumeControlPanel.Visibility = Visibility.Collapsed;
+            VideoContainer.Visibility = Visibility.Visible;
+            MouseControlContainer.Visibility = Visibility.Collapsed;
+            Log("Connection stopped.");
+        }
+
+        private void UpdateInterfaceLayout()
+        {
+            bool isControlsOnly = ControlsOnlyToggle.IsOn;
+            if (isControlsOnly)
+            {
+                VideoContainer.Visibility = Visibility.Collapsed;
+                MouseControlContainer.Visibility = Visibility.Visible;
+            }
             else
-                EnterFullScreen();
+            {
+                VideoContainer.Visibility = Visibility.Visible;
+                MouseControlContainer.Visibility = Visibility.Collapsed;
+            }
         }
 
-        private void EnterFullScreen()
+        private byte[] GetJarBytes()
         {
-            HamburgerButton.Visibility = Visibility.Collapsed;
-            MainSplitView.IsPaneOpen = false;
-            ApplicationView.GetForCurrentView().TryEnterFullScreenMode();
-        }
-
-        private void ExitFullScreen()
-        {
-            HamburgerButton.Visibility = Visibility.Visible;
-            ApplicationView.GetForCurrentView().ExitFullScreenMode();
+            var assembly = typeof(MainPage).GetTypeInfo().Assembly;
+            string resourceName = "uwpscrcpy.Vendor.scrcpy-server.jar";
+            using (var stream = assembly.GetManifestResourceStream(resourceName))
+            {
+                if (stream == null) throw new Exception("scrcpy-server.jar not found.");
+                byte[] buffer = new byte[stream.Length];
+                stream.Read(buffer, 0, buffer.Length);
+                return buffer;
+            }
         }
 
         private void SetControlsEnabled(bool enabled)
@@ -120,188 +185,91 @@ namespace uwpscrcpy
             MaxSizeBox.IsEnabled = enabled;
             MaxFpsBox.IsEnabled = enabled;
             ControlsOnlyToggle.IsEnabled = enabled;
-            UhidMouseToggle.IsEnabled = enabled && ControlsOnlyToggle.IsOn;
-            InvertScrollToggle.IsEnabled = enabled && UhidMouseToggle.IsOn;
+            InvertScrollToggle.IsEnabled = enabled && ControlsOnlyToggle.IsOn;
         }
 
         private void Log(string msg)
         {
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, () =>
             {
-                if (LogBlock.Text.Length > 2000) LogBlock.Text = LogBlock.Text.Substring(0, 1000);
-                string time = DateTime.Now.ToString("mm:ss");
+                if (LogBlock.Text.Length > 2000) LogBlock.Text = "";
+                string time = DateTime.Now.ToString("HH:mm:ss");
                 LogBlock.Text = $"[{time}] {msg}\n" + LogBlock.Text;
             });
         }
 
-        private async Task StartConnection()
+        private async void HamburgerButton_Click(object sender, RoutedEventArgs e)
         {
-            try
+            MainSplitView.IsPaneOpen = !MainSplitView.IsPaneOpen;
+            if (MainSplitView.IsPaneOpen && _controller != null && ConnectToggle.IsChecked == true)
             {
-                Cleanup();
-                _cts = new CancellationTokenSource();
-                _session = new ScrcpySession();
-                string ip = IpAddressBox.Text;
-                if (!int.TryParse(PortBox.Text, out int port)) port = 5555;
-                int.TryParse(BitRateBox.Text, out int mbps);
-                int bitRate = (mbps > 0) ? mbps * 1000000 : 4000000;
-                int.TryParse(MaxSizeBox.Text, out int size);
-                int maxSize = size;
-                int.TryParse(MaxFpsBox.Text, out int fps);
-                int maxFps = (fps > 0) ? fps : 30;
-                bool video = !ControlsOnlyToggle.IsOn;
-                _isUhidMouseMode = UhidMouseToggle.IsOn && !video;
-                if (video) _displayRequest.RequestActive();
-                await _session.ConnectAndStartAsync(ip, port, bitRate, maxSize, maxFps, video, _isUhidMouseMode, Log);
-                _inputManager = new InputManager(_session, VideoPanel, MousePadArea, LeftClickArea, RightClickArea, InvertScrollToggle);
-                _inputManager.RegisterInputHandlers();
-                _inputManager.SetUhidMode(_isUhidMouseMode);
-                VolumeControlPanel.Visibility = Visibility.Visible;
-                int currentVolume = await _session.GetVolumeAsync();
-                if (currentVolume != -1)
+                int vol = await _controller.GetVolumeAsync();
+                if (vol != -1)
                 {
-                    VolumeSlider.Value = currentVolume;
+                    VolumeSlider.PointerCaptureLost -= VolumeSlider_PointerCaptureLost;
+                    VolumeSlider.Value = vol;
+                    VolumeSlider.PointerCaptureLost += VolumeSlider_PointerCaptureLost;
                 }
-                if (_isUhidMouseMode)
-                {
-                    MouseControlContainer.Visibility = Visibility.Visible;
-                    VideoContainer.Visibility = Visibility.Collapsed;
-                }
-                else if (video)
-                {
-                    Log($"Connected. Stream: {_session.Width}x{_session.Height}");
-                    _videoEngine.Initialize(_session.Width, _session.Height);
-                    _videoEngine.SetPanel(VideoPanel);
-                    VideoPanel.Width = _session.Width;
-                    VideoPanel.Height = _session.Height;
-                    _ = Task.Factory.StartNew(() => VideoLoop(_cts.Token), _cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-                }
-                else
-                {
-                    Log($"Controls-Only Mode.");
-                    VideoPanel.Width = _session.Width;
-                    VideoPanel.Height = _session.Height;
-                }
-            }
-            catch (Exception ex)
-            {
-                Log($"Error: {ex.Message}");
-                Cleanup();
-                ConnectToggle.IsChecked = false;
-                ConnectToggle.Content = "Start";
-                SetControlsEnabled(true);
             }
         }
 
-        private void Cleanup()
+        private void FullScreenButton_Click(object sender, RoutedEventArgs e)
         {
-            _sessionActive = false;
-            _pendingConfig = null;
-            _videoEngine?.Stop();
-            _inputManager?.UnregisterInputHandlers();
-            _inputManager = null;
-            VolumeControlPanel.Visibility = Visibility.Collapsed;
-            VolumeSlider.Value = 0;
-            MouseControlContainer.Visibility = Visibility.Collapsed;
-            VideoContainer.Visibility = Visibility.Visible;
-            VideoPanel.Width = double.NaN;
-            VideoPanel.Height = double.NaN;
-            try { _displayRequest.RequestRelease(); } catch { }
-            _cts?.Cancel();
-            _session?.Dispose();
-            _session = null;
-        }
-
-        private async void VolumeSlider_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
-        {
-            if (_session == null) return;
-            int newVolume = (int)VolumeSlider.Value;
-            Log($"Setting device volume to {newVolume}...");
-            await _session.SetVolumeAsync(newVolume);
-        }
-
-        private async Task VideoLoop(CancellationToken token)
-        {
-            try
+            var view = ApplicationView.GetForCurrentView();
+            if (view.IsFullScreenMode)
             {
-                var stream = _session.VideoStream;
-                if (stream == null) return;
-                while (!token.IsCancellationRequested)
+                view.ExitFullScreenMode();
+                HamburgerButton.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                if (view.TryEnterFullScreenMode())
                 {
-                    if (!await ReadExactAsync(stream, _headerBuffer, 0, 12, token)) break;
-                    ulong ptsData = ((ulong)_headerBuffer[0] << 56) | ((ulong)_headerBuffer[1] << 48) |
-                                    ((ulong)_headerBuffer[2] << 40) | ((ulong)_headerBuffer[3] << 32) |
-                                    ((ulong)_headerBuffer[4] << 24) | ((ulong)_headerBuffer[5] << 16) |
-                                    ((ulong)_headerBuffer[6] << 8) | _headerBuffer[7];
-                    uint packetSize = ((uint)_headerBuffer[8] << 24) | ((uint)_headerBuffer[9] << 16) |
-                                      ((uint)_headerBuffer[10] << 8) | _headerBuffer[11];
-                    bool isConfig = (ptsData & 0x8000000000000000) != 0;
-                    ulong ptsUs = ptsData & 0x3FFFFFFFFFFFFFFF;
-                    byte[] packetData = new byte[packetSize];
-                    if (!await ReadExactAsync(stream, packetData, 0, (int)packetSize, token)) break;
-                    if (isConfig)
-                    {
-                        _pendingConfig = packetData;
-                        if (_sessionActive) Log("[Info] Config packet received mid-stream (Orientation change?)");
-                        _sessionActive = true;
-                        continue;
-                    }
-                    IBuffer bufferToSend = (_pendingConfig != null)
-                        ? MergeBuffer(_pendingConfig, packetData)
-                        : packetData.AsBuffer();
-                    if (_pendingConfig != null) _pendingConfig = null;
-                    _videoEngine.PushFrame(bufferToSend, (long)ptsUs);
+                    HamburgerButton.Visibility = Visibility.Collapsed;
+                    MainSplitView.IsPaneOpen = false;
                 }
             }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
+        }
+
+        private void MainPage_BackRequested(object sender, BackRequestedEventArgs e)
+        {
+            var view = ApplicationView.GetForCurrentView();
+            if (view.IsFullScreenMode)
             {
-                Log($"Video Loop Error: {ex.Message}");
-                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                view.ExitFullScreenMode();
+                HamburgerButton.Visibility = Visibility.Visible;
+                e.Handled = true;
+            }
+        }
+
+        private void CoreWindow_KeyDown(CoreWindow sender, KeyEventArgs args)
+        {
+            if (args.VirtualKey == VirtualKey.Escape)
+            {
+                var view = ApplicationView.GetForCurrentView();
+                if (view.IsFullScreenMode)
                 {
-                    if (ConnectToggle.IsChecked == true)
-                    {
-                        Cleanup();
-                        ConnectToggle.IsChecked = false;
-                        ConnectToggle.Content = "Start";
-                        SetControlsEnabled(true);
-                    }
-                });
+                    view.ExitFullScreenMode();
+                    HamburgerButton.Visibility = Visibility.Visible;
+                    args.Handled = true;
+                }
             }
-        }
-
-        private IBuffer MergeBuffer(byte[] config, byte[] frame)
-        {
-            byte[] combined = new byte[config.Length + frame.Length];
-            System.Buffer.BlockCopy(config, 0, combined, 0, config.Length);
-            System.Buffer.BlockCopy(frame, 0, combined, config.Length, frame.Length);
-            return combined.AsBuffer();
-        }
-
-        private async Task<bool> ReadExactAsync(AdbStream stream, byte[] buffer, int offset, int count, CancellationToken token)
-        {
-            int totalRead = 0;
-            while (totalRead < count)
-            {
-                int read = await stream.ReadAsync(buffer, offset + totalRead, count - totalRead, token);
-                if (read == 0) return false;
-                totalRead += read;
-            }
-            return true;
         }
 
         private void ControlsOnlyToggle_Toggled(object sender, RoutedEventArgs e)
         {
-            if (UhidMouseToggle != null)
-            {
-                UhidMouseToggle.IsEnabled = ControlsOnlyToggle.IsOn;
-                if (!ControlsOnlyToggle.IsOn) UhidMouseToggle.IsOn = false;
-            }
+            if (InvertScrollToggle != null) InvertScrollToggle.IsEnabled = ControlsOnlyToggle.IsOn;
+            if (_controller != null) UpdateInterfaceLayout();
         }
 
-        private void UhidMouseToggle_Toggled(object sender, RoutedEventArgs e)
+        private void VolumeSlider_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
-            if (InvertScrollToggle != null) InvertScrollToggle.IsEnabled = UhidMouseToggle.IsOn;
+            if (_controller != null)
+            {
+                int vol = (int)VolumeSlider.Value;
+                Log($"Setting volume to {vol}...");
+                _controller.SetVolume(vol);
+            }
         }
     }
 }
