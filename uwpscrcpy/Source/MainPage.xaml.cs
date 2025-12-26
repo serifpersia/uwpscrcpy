@@ -1,8 +1,8 @@
 using System;
 using System.Reflection;
 using System.Threading.Tasks;
-using Windows.System; // <--- Add this
-using Windows.System.Display; // <--- Add this
+using Windows.System;
+using Windows.System.Display;
 using Windows.UI.Core;
 using Windows.UI.ViewManagement;
 using Windows.UI.Xaml;
@@ -17,23 +17,17 @@ namespace uwpscrcpy
     {
         private readonly ScrcpyController _controller;
         private readonly AdbCrypto _crypto;
-        private InputManager _inputManager; // New Field
-
+        private InputManager _inputManager;
         private readonly DisplayRequest _displayRequest = new DisplayRequest();
 
         public MainPage()
         {
             this.InitializeComponent();
-
             _crypto = new AdbCrypto();
             _controller = new ScrcpyController();
-
             _controller.SetDispatcher(Window.Current.CoreWindow.Dispatcher);
-
             _controller.OnLog += (msg) => Log(msg);
             _controller.OnResolutionChanged += Controller_OnResolutionChanged;
-
-            // --- NEW: Handle Back Button & Escape Key ---
             SystemNavigationManager.GetForCurrentView().BackRequested += MainPage_BackRequested;
             Window.Current.CoreWindow.KeyDown += CoreWindow_KeyDown;
         }
@@ -88,9 +82,6 @@ namespace uwpscrcpy
                 int.TryParse(MaxFpsBox.Text, out int maxFps);
                 byte[] jarBytes = GetJarBytes();
 
-                // REFACTORED LOGIC:
-                // If Controls Only is ON -> Video is OFF, UHID is ON.
-                // If Controls Only is OFF -> Video is ON, UHID is OFF (Standard Touch).
                 bool isControlsOnly = ControlsOnlyToggle.IsOn;
                 bool isVideoEnabled = !isControlsOnly;
                 bool isUhidEnabled = isControlsOnly;
@@ -106,10 +97,8 @@ namespace uwpscrcpy
                 {
                     Log("Connecting to ADB...");
                     if (!_controller.Connect(ip, port)) throw new Exception("ADB Fail");
-
                     Log("Deploying server...");
                     _controller.DeployServer(jarBytes);
-
                     Log($"Starting scrcpy (Video: {isVideoEnabled}, UHID: {isUhidEnabled})...");
                     _controller.StartScrcpy(bitRate, maxSize, maxFps, isVideoEnabled, isUhidEnabled);
                 });
@@ -118,7 +107,6 @@ namespace uwpscrcpy
                 _inputManager.RegisterInputHandlers();
                 _inputManager.SetUhidMode(isUhidEnabled);
 
-                // Handle Layout for Controls Only
                 if (isControlsOnly)
                 {
                     VideoPanel.Width = double.NaN;
@@ -128,13 +116,10 @@ namespace uwpscrcpy
 
                 UpdateInterfaceLayout();
                 VolumeControlPanel.Visibility = Visibility.Visible;
-
                 _displayRequest.RequestActive();
 
-                // Get Initial Volume
                 int currentVol = await _controller.GetVolumeAsync();
                 if (currentVol != -1) VolumeSlider.Value = currentVol;
-
                 return true;
             }
             catch (Exception ex)
@@ -148,43 +133,32 @@ namespace uwpscrcpy
         private async Task StopConnectionAsync()
         {
             Log("Stopping connection...");
-
             _displayRequest.RequestRelease();
 
-            // Clean up Input
             if (_inputManager != null)
             {
                 _inputManager.UnregisterInputHandlers();
                 _inputManager = null;
             }
 
-            // Stop Network
-            await Task.Run(() =>
-            {
-                _controller?.Stop();
-            });
+            await Task.Run(() => { _controller?.Stop(); });
 
-            // Reset UI
             VolumeControlPanel.Visibility = Visibility.Collapsed;
             VideoContainer.Visibility = Visibility.Visible;
             MouseControlContainer.Visibility = Visibility.Collapsed;
-
             Log("Connection stopped.");
         }
 
         private void UpdateInterfaceLayout()
         {
             bool isControlsOnly = ControlsOnlyToggle.IsOn;
-
             if (isControlsOnly)
             {
-                // Always show Mouse UI in Controls Only mode now
                 VideoContainer.Visibility = Visibility.Collapsed;
                 MouseControlContainer.Visibility = Visibility.Visible;
             }
             else
             {
-                // Video Mode
                 VideoContainer.Visibility = Visibility.Visible;
                 MouseControlContainer.Visibility = Visibility.Collapsed;
             }
@@ -227,14 +201,11 @@ namespace uwpscrcpy
         private async void HamburgerButton_Click(object sender, RoutedEventArgs e)
         {
             MainSplitView.IsPaneOpen = !MainSplitView.IsPaneOpen;
-
             if (MainSplitView.IsPaneOpen && _controller != null && ConnectToggle.IsChecked == true)
             {
-                // Refresh Volume
                 int vol = await _controller.GetVolumeAsync();
                 if (vol != -1)
                 {
-                    // Avoid triggering the set event
                     VolumeSlider.PointerCaptureLost -= VolumeSlider_PointerCaptureLost;
                     VolumeSlider.Value = vol;
                     VolumeSlider.PointerCaptureLost += VolumeSlider_PointerCaptureLost;
@@ -265,18 +236,14 @@ namespace uwpscrcpy
             var view = ApplicationView.GetForCurrentView();
             if (view.IsFullScreenMode)
             {
-                // Exit Fullscreen
                 view.ExitFullScreenMode();
                 HamburgerButton.Visibility = Visibility.Visible;
-
-                // Mark as handled so the OS doesn't suspend/close the app
                 e.Handled = true;
             }
         }
 
         private void CoreWindow_KeyDown(CoreWindow sender, KeyEventArgs args)
         {
-            // Check for Escape Key
             if (args.VirtualKey == VirtualKey.Escape)
             {
                 var view = ApplicationView.GetForCurrentView();
@@ -291,17 +258,8 @@ namespace uwpscrcpy
 
         private void ControlsOnlyToggle_Toggled(object sender, RoutedEventArgs e)
         {
-            // Update Invert Scroll availability based on the mode
-            if (InvertScrollToggle != null)
-            {
-                InvertScrollToggle.IsEnabled = ControlsOnlyToggle.IsOn;
-            }
-
-            // Live Update if connected
-            if (_controller != null)
-            {
-                UpdateInterfaceLayout();
-            }
+            if (InvertScrollToggle != null) InvertScrollToggle.IsEnabled = ControlsOnlyToggle.IsOn;
+            if (_controller != null) UpdateInterfaceLayout();
         }
 
         private void VolumeSlider_PointerCaptureLost(object sender, PointerRoutedEventArgs e)

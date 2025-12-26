@@ -16,7 +16,6 @@ namespace uwpscrcpy
         {
             _rsa = RSA.Create();
             _rsa.KeySize = 2048;
-
             var localSettings = ApplicationData.Current.LocalSettings;
             if (localSettings.Values.ContainsKey(KEY_CONTAINER))
             {
@@ -45,12 +44,10 @@ namespace uwpscrcpy
             BigInteger N = new BigInteger(nBytesPos);
             BigInteger R = BigInteger.Pow(2, 2048);
             BigInteger RR = (R * R) % N;
-
             uint n0 = (uint)(N & 0xFFFFFFFF);
             uint n0inv = 1;
             unchecked { for (int i = 0; i < 5; i++) n0inv *= (2 - n0 * n0inv); }
             n0inv = unchecked(0 - n0inv);
-
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms))
             {
@@ -59,7 +56,6 @@ namespace uwpscrcpy
                 WriteBigInt(w, N, 256);
                 WriteBigInt(w, RR, 256);
                 w.Write((uint)65537);
-
                 string b64 = Convert.ToBase64String(ms.ToArray());
                 return Encoding.UTF8.GetBytes(b64 + " scrcpy-uwp\0");
             }

@@ -17,10 +17,18 @@
 #include <d3d11.h>
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
 #include <mftransform.h>
+#include <codecapi.h>
+#include <codecvt>
+#include <regex>
+#include <wrl.h>
+#include <robuffer.h>
+#include <windows.ui.xaml.media.dxinterop.h>
+#include <Windows.Foundation.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")

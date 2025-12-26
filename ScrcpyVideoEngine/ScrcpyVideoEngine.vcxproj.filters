@@ -13,12 +13,31 @@
     <ClCompile Include="pch.cpp">
       <Filter>Source</Filter>
     </ClCompile>
-    <ClCompile Include="ScrcpyController.cpp" />
+    <ClCompile Include="VideoEngine.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="AdbClient.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="ScrcpyController.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h">
       <Filter>Source</Filter>
     </ClInclude>
-    <ClInclude Include="ScrcpyController.h" />
+    <ClInclude Include="Utils.h">
+      <Filter>Source</Filter>
+    </ClInclude>
+    <ClInclude Include="VideoEngine.h">
+      <Filter>Source</Filter>
+    </ClInclude>
+    <ClInclude Include="AdbClient.h">
+      <Filter>Source</Filter>
+    </ClInclude>
+    <ClInclude Include="ScrcpyController.h">
+      <Filter>Source</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
