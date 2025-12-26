@@ -123,6 +123,9 @@ bool ScrcpyController::Connect(String^ ip, int port)
 	m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (m_socket == INVALID_SOCKET) return false;
 
+	int rcvBufSize = 512 * 1024; // 512KB Buffer
+	setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF, (char*)&rcvBufSize, sizeof(rcvBufSize));
+
 	std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
 	std::string ip_str = conv.to_bytes(ip->Data());
 
@@ -190,6 +193,12 @@ void ScrcpyController::Stop()
 			if (m_panelNative) {
 				m_panelNative->SetSwapChain(nullptr);
 			}
+
+			// --- ADD THESE LINES ---
+			m_cachedOutputView.Reset();
+			m_cachedBackBuffer.Reset();
+			// -----------------------
+
 			m_swapChain.Reset();
 			m_decoder.Reset();
 			m_videoProcessor.Reset();
@@ -235,8 +244,14 @@ void ScrcpyController::StartScrcpy(int bitRate, int maxSize, int maxFps) {
 	m_scid = GenerateScid();
 	m_videoStage = 1;
 	m_videoReadPos = 0;
+
 	m_pendingConfig.clear();
+
 	m_videoBuffer.clear();
+	// OPTIMIZATION: Pre-allocate 2MB. 
+	// This prevents the vector from constantly re-allocating heap memory 
+	// as the stream comes in.
+	m_videoBuffer.reserve(2 * 1024 * 1024);
 
 	OpenStream("reverse:forward:localabstract:scrcpy_" + m_scid + ";tcp:27183");
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -357,7 +372,7 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 	case A_WRTE: {
 		SendPacket(A_OKAY, a0, a1, nullptr, 0);
 		if (a1 == m_serverLocalId) {
-			Log("[SERVER] " + std::string((char*)payload, dlen));
+			//Log("[SERVER] " + std::string((char*)payload, dlen));
 		}
 		else if (a1 == m_videoLocalId) {
 			m_videoBuffer.insert(m_videoBuffer.end(), payload, payload + dlen);
@@ -392,15 +407,35 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 							m_pendingConfig.assign(packetStart, packetStart + pSize);
 						}
 						else {
-							std::vector<uint8_t> bufferToSend;
-							if (!m_pendingConfig.empty()) {
-								bufferToSend.insert(bufferToSend.end(), m_pendingConfig.begin(), m_pendingConfig.end());
-								m_pendingConfig.clear();
+
+							DWORD configSize = (DWORD)m_pendingConfig.size();
+							DWORD totalSize = pSize + configSize;
+
+							// 2. Create DirectX Buffer DIRECTLY (No WinRT, no std::vector copies)
+							ComPtr<IMFMediaBuffer> mediaBuffer;
+							HRESULT hr = MFCreateMemoryBuffer(totalSize, &mediaBuffer);
+
+							if (SUCCEEDED(hr)) {
+								BYTE* dest = nullptr;
+								// Lock the buffer to write to it directly
+								mediaBuffer->Lock(&dest, nullptr, nullptr);
+
+								// Copy Config if present (SPS/PPS)
+								if (configSize > 0) {
+									memcpy(dest, m_pendingConfig.data(), configSize);
+									dest += configSize;
+									m_pendingConfig.clear();
+								}
+
+								// Copy Video Payload directly from the recv buffer
+								memcpy(dest, packetStart, pSize);
+
+								mediaBuffer->Unlock();
+								mediaBuffer->SetCurrentLength(totalSize);
+
+								// Send to Decoder
+								PushFrame(mediaBuffer, ptsUs);
 							}
-							bufferToSend.insert(bufferToSend.end(), packetStart, packetStart + pSize);
-							auto platArray = ref new Array<byte>((byte*)bufferToSend.data(), (unsigned int)bufferToSend.size());
-							IBuffer^ iBuf = CryptographicBuffer::CreateFromByteArray(platArray);
-							PushFrame(iBuf, ptsUs);
 						}
 						m_videoReadPos += (12 + pSize);
 						work = true;
@@ -460,8 +495,15 @@ uint64_t ScrcpyController::ReadBE64(const uint8_t* d) { return ((uint64_t)d[0] <
 uint32_t ScrcpyController::ReadBE32(const uint8_t* d) { return ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) | ((uint32_t)d[2] << 8) | (uint32_t)d[3]; }
 
 void ScrcpyController::CompactVideoBuffer() {
-	if (m_videoReadPos > 0) {
+	// OPTIMIZATION: "Lazy Compaction"
+	// Don't shift memory after every packet. Moving memory is O(N) and expensive.
+	// Only shift when we have a significant amount of dead space (e.g., 256KB).
+	// This dramatically reduces CPU usage on Snapdragon 400.
+	const size_t COMPACT_THRESHOLD = 256 * 1024; // 256KB
+
+	if (m_videoReadPos > COMPACT_THRESHOLD) {
 		if (m_videoBuffer.size() > m_videoReadPos) {
+			// Move only the remaining data to the front
 			m_videoBuffer.erase(m_videoBuffer.begin(), m_videoBuffer.begin() + m_videoReadPos);
 		}
 		else {
@@ -469,49 +511,96 @@ void ScrcpyController::CompactVideoBuffer() {
 		}
 		m_videoReadPos = 0;
 	}
+	// If we haven't reached the threshold, do nothing. 
+	// We just keep appending to the vector and reading via the index.
+}
+
+void ScrcpyController::ApplyResolutionChange(uint32_t width, uint32_t height)
+{
+	if (m_width == width && m_height == height) return;
+
+	// OPTIMIZATION: Release cached views immediately before resizing
+	m_cachedOutputView.Reset();
+	m_cachedBackBuffer.Reset();
+
+	m_width = width;
+	m_height = height;
+
+	if (m_d3dContext) {
+		m_d3dContext->OMSetRenderTargets(0, nullptr, nullptr);
+		m_d3dContext->ClearState();
+		m_d3dContext->Flush();
+	}
+
+	if (m_swapChain) {
+		// ResizeBuffers requires all references to backbuffers to be released
+		m_swapChain->ResizeBuffers(2, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+	}
+
+	// Recreate Processor for new size
+	if (m_videoDevice) {
+		m_videoProcessorEnum.Reset();
+		m_videoProcessor.Reset();
+		// ... (Create Video Processor logic with new Width/Height) ...
+		D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc = {};
+		desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+		desc.InputFrameRate.Numerator = 60; desc.InputFrameRate.Denominator = 1;
+		desc.InputWidth = width; desc.InputHeight = height;
+		desc.OutputFrameRate.Numerator = 60; desc.OutputFrameRate.Denominator = 1;
+		desc.OutputWidth = width; desc.OutputHeight = height;
+		desc.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
+
+		m_videoDevice->CreateVideoProcessorEnumerator(&desc, &m_videoProcessorEnum);
+		if (m_videoProcessorEnum) {
+			m_videoDevice->CreateVideoProcessor(m_videoProcessorEnum.Get(), 0, &m_videoProcessor);
+		}
+	}
 }
 
 void ScrcpyController::InitializeVideo(uint32_t width, uint32_t height)
 {
 	std::lock_guard<std::mutex> lock(m_renderMutex);
 
-	m_width = width; m_height = height;
-	Log("Initializing Video Subsystem (Res: " + std::to_string(width) + "x" + std::to_string(height) + ")...");
+	// If already initialized, just ensure resolution is correct
+	if (m_isInitialized) {
+		ApplyResolutionChange(width, height);
+		return;
+	}
+
+	// First time setup
+	m_width = width;
+	m_height = height;
+	Log("Initializing Video Subsystem...");
 
 	m_decoder.Reset();
-	if (m_panelNative) {
-		m_panelNative->SetSwapChain(nullptr);
-	}
+	if (m_panelNative) m_panelNative->SetSwapChain(nullptr);
 	m_swapChain.Reset();
-
 
 	if (!InitDX11()) { Log("Failed to init DX11."); return; }
 	if (!InitDecoder(width, height)) { Log("Failed to init decoder."); return; }
 
-	if (m_panelNative) {
-		CreateSwapChain(width, height);
-	}
+	if (m_panelNative) CreateSwapChain(width, height);
 
-	if (!m_isInitialized) {
-		m_isInitialized = true;
-		m_decoderAction = ThreadPool::RunAsync(
-			ref new WorkItemHandler([this](IAsyncAction^ action) {
-			this->DecoderLoop();
-		}), WorkItemPriority::High);
-	}
+	m_isInitialized = true;
+	m_decoderAction = ThreadPool::RunAsync(
+		ref new WorkItemHandler([this](IAsyncAction^ action) {
+		this->DecoderLoop();
+	}), WorkItemPriority::High);
 }
 
-void ScrcpyController::PushFrame(IBuffer^ buf, int64_t raw_pts) {
-	if (!buf || buf->Length == 0 || !m_running) return;
+void ScrcpyController::PushFrame(ComPtr<IMFMediaBuffer> buf, int64_t raw_pts) {
+	if (!buf || !m_running) return;
 	PacketData packet;
 	packet.pts = raw_pts;
-	packet.buffer = buf;
+	packet.mediaBuffer = buf; // Direct copy of pointer
 	{
 		std::lock_guard<std::mutex> lock(m_queueMutex);
 		m_packetQueue.push(packet);
 	}
 	m_queueCv.notify_one();
 }
+
+// In ScrcpyController.cpp
 
 void ScrcpyController::DecoderLoop() {
 	while (m_running) {
@@ -529,25 +618,17 @@ void ScrcpyController::DecoderLoop() {
 
 		if (m_baselinePts == -1) m_baselinePts = packet.pts;
 
-		ComPtr<IUnknown> unk = reinterpret_cast<IUnknown*>(packet.buffer);
-		ComPtr<IBufferByteAccess> bufferByteAccess;
-		if (FAILED(unk.As(&bufferByteAccess))) continue;
-		byte* rawData = nullptr;
-		if (FAILED(bufferByteAccess->Buffer(&rawData))) continue;
-
-		ComPtr<IMFMediaBuffer> mb;
-		MFCreateMemoryBuffer(packet.buffer->Length, &mb);
-		BYTE* dest = nullptr;
-		mb->Lock(&dest, nullptr, nullptr);
-		memcpy(dest, rawData, packet.buffer->Length);
-		mb->Unlock();
-		mb->SetCurrentLength(packet.buffer->Length);
+		// --- INSERT THIS (Zero Copy usage) ---
 
 		ComPtr<IMFSample> sample;
 		MFCreateSample(&sample);
-		sample->AddBuffer(mb.Get());
+
+		// Use the buffer we created in HandlePacket directly!
+		sample->AddBuffer(packet.mediaBuffer.Get());
+
 		sample->SetSampleDuration(0);
 		sample->SetSampleTime((packet.pts - m_baselinePts) * 10);
+
 		HRESULT hr = m_decoder->ProcessInput(0, sample.Get(), 0);
 		if (SUCCEEDED(hr) || hr == MF_E_NOTACCEPTING) {
 			ProcessDecodedOutput();
@@ -564,8 +645,41 @@ void ScrcpyController::ProcessDecodedOutput() {
 
 		if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
 			ComPtr<IMFMediaType> t;
-			m_decoder->GetOutputAvailableType(0, 0, &t);
-			m_decoder->SetOutputType(0, t.Get(), 0);
+			if (SUCCEEDED(m_decoder->GetOutputAvailableType(0, 0, &t))) {
+				m_decoder->SetOutputType(0, t.Get(), 0);
+
+				// --- FIX STARTS HERE ---
+				UINT32 w = 0, h = 0;
+
+				// 1. Try to get the defined Display Aperture (The clean area without green padding)
+				MFVideoArea aperture = { 0 };
+				UINT32 blobSize = 0;
+				HRESULT hrAperture = t->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, (UINT8*)&aperture, sizeof(aperture), &blobSize);
+
+				if (SUCCEEDED(hrAperture) && blobSize == sizeof(aperture) && aperture.Area.cx > 0 && aperture.Area.cy > 0) {
+					w = aperture.Area.cx;
+					h = aperture.Area.cy;
+				}
+				else {
+					// 2. Fallback to Frame Size if Aperture is missing (usually includes padding)
+					MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
+				}
+
+				// Apply the Clean Resolution
+				if (w > 0 && h > 0) {
+					// This will resize the SwapChain to the exact "Clean" size
+					// prohibiting the green bars from being part of the render target.
+					ApplyResolutionChange(w, h);
+
+					// Optional: Notify C# of the "Real" decoded size if needed
+					if (m_dispatcher) {
+						m_dispatcher->RunAsync(CoreDispatcherPriority::Normal, ref new DispatchedHandler([this, w, h]() {
+							OnResolutionChanged(w, h);
+						}));
+					}
+				}
+				// --- FIX ENDS HERE ---
+			}
 			continue;
 		}
 
@@ -591,18 +705,31 @@ void ScrcpyController::ProcessDecodedOutput() {
 void ScrcpyController::RenderFrame(ID3D11Texture2D* decoderTex, UINT subIndex) {
 	if (!m_swapChain || !m_videoProcessor || !m_videoContext) return;
 
-	ComPtr<ID3D11Texture2D> backBuffer;
-	if (FAILED(m_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) return;
+	// OPTIMIZATION: Create OutputView only if it doesn't exist or was reset
+	if (!m_cachedOutputView) {
+		HRESULT hr = m_swapChain->GetBuffer(0, IID_PPV_ARGS(&m_cachedBackBuffer));
+		if (FAILED(hr)) return;
 
-	D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = { D3D11_VPOV_DIMENSION_TEXTURE2D };
-	ComPtr<ID3D11VideoProcessorOutputView> outputView;
-	if (FAILED(m_videoDevice->CreateVideoProcessorOutputView(backBuffer.Get(), m_videoProcessorEnum.Get(), &outputViewDesc, &outputView))) {
-		return;
+		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = { D3D11_VPOV_DIMENSION_TEXTURE2D };
+
+		hr = m_videoDevice->CreateVideoProcessorOutputView(
+			m_cachedBackBuffer.Get(),
+			m_videoProcessorEnum.Get(),
+			&outputViewDesc,
+			&m_cachedOutputView
+		);
+
+		if (FAILED(hr)) {
+			// If creation fails, reset buffer to try again next frame
+			m_cachedBackBuffer.Reset();
+			return;
+		}
 	}
 
 	D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc = { 0 };
 	inputViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
 	inputViewDesc.Texture2D.ArraySlice = subIndex;
+
 	ComPtr<ID3D11VideoProcessorInputView> inputView;
 	if (FAILED(m_videoDevice->CreateVideoProcessorInputView(decoderTex, m_videoProcessorEnum.Get(), &inputViewDesc, &inputView))) {
 		return;
@@ -611,12 +738,16 @@ void ScrcpyController::RenderFrame(ID3D11Texture2D* decoderTex, UINT subIndex) {
 	D3D11_VIDEO_PROCESSOR_STREAM stream = { 0 };
 	stream.Enable = TRUE;
 	stream.pInputSurface = inputView.Get();
+
 	RECT sourceRect = { 0, 0, (LONG)m_width, (LONG)m_height };
 	m_videoContext->VideoProcessorSetStreamSourceRect(m_videoProcessor.Get(), 0, TRUE, &sourceRect);
 	m_videoContext->VideoProcessorSetStreamDestRect(m_videoProcessor.Get(), 0, FALSE, nullptr);
-	HRESULT hr = m_videoContext->VideoProcessorBlt(m_videoProcessor.Get(), outputView.Get(), 0, 1, &stream);
+
+	// Use the Cached Output View
+	HRESULT hr = m_videoContext->VideoProcessorBlt(m_videoProcessor.Get(), m_cachedOutputView.Get(), 0, 1, &stream);
 
 	if (SUCCEEDED(hr)) {
+		// Sync interval 0 for lowest latency (tearing allowed)
 		m_swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
 	}
 }
@@ -670,7 +801,11 @@ bool ScrcpyController::InitDecoder(uint32_t width, uint32_t height) {
 	if (SUCCEEDED(m_decoder->GetAttributes(&mftAttr))) {
 		mftAttr->SetUINT32(MF_LOW_LATENCY, 1);
 		mftAttr->SetUINT32(CODECAPI_AVLowLatencyMode_Local, 1);
+
+		mftAttr->SetUINT32(CODECAPI_AVDecVideoMaxCodedWidth, width);
+		mftAttr->SetUINT32(CODECAPI_AVDecVideoMaxCodedHeight, height);
 	}
+
 	m_decoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)m_dxgiManager.Get());
 	ComPtr<IMFMediaType> inType;
 	MFCreateMediaType(&inType);

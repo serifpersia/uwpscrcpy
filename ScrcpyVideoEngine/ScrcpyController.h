@@ -29,7 +29,7 @@ namespace ScrcpyVideoEngine
 	public delegate Platform::Array<byte>^ AuthKeyHandler();
 
 	struct PacketData {
-		Windows::Storage::Streams::IBuffer^ buffer;
+		Microsoft::WRL::ComPtr<IMFMediaBuffer> mediaBuffer;
 		int64_t pts;
 	};
 
@@ -98,12 +98,15 @@ namespace ScrcpyVideoEngine
 		Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> m_videoProcessorEnum;
 		Microsoft::WRL::ComPtr<ID3D11VideoProcessor> m_videoProcessor;
 
+		Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> m_cachedOutputView;
+		Microsoft::WRL::ComPtr<ID3D11Texture2D> m_cachedBackBuffer;
+
 		void Log(const std::string& msg);
 		std::vector<uint8_t> PerformSign(const std::vector<uint8_t>& token);
 		std::vector<uint8_t> GetKey();
 		void ReceiveLoop();
 		void HandlePacket(uint32_t cmd, uint32_t arg0, uint32_t arg1, uint32_t dlen, const uint8_t* payload);
-		void PushFrame(Windows::Storage::Streams::IBuffer^ buf, int64_t raw_pts);
+		void PushFrame(Microsoft::WRL::ComPtr<IMFMediaBuffer> buf, int64_t raw_pts);
 		void DecoderLoop();
 		void ProcessDecodedOutput();
 		void RenderFrame(ID3D11Texture2D* decoderTex, UINT subIndex);
@@ -116,5 +119,6 @@ namespace ScrcpyVideoEngine
 		bool InitDX11();
 		bool InitDecoder(uint32_t width, uint32_t height);
 		void CreateSwapChain(uint32_t width, uint32_t height);
+		void ApplyResolutionChange(uint32_t width, uint32_t height);
 	};
 }

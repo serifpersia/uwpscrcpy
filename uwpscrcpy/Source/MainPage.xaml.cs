@@ -28,18 +28,16 @@ namespace uwpscrcpy
             _controller.OnLog += (msg) => Log(msg);
             _controller.OnResolutionChanged += Controller_OnResolutionChanged;
         }
-
         private void Controller_OnResolutionChanged(uint newWidth, uint newHeight)
         {
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                // --- THIS IS THE CRITICAL FIX ---
-                Log($"Resolution received: {newWidth}x{newHeight}. Initializing C++ video subsystem...");
+                Log($"Resolution received: {newWidth}x{newHeight}. Updating video subsystem...");
 
-                // Explicitly tell the C++ controller to start the video engine.
+                // REVERT THIS: Call InitializeVideo, not ResizeVideo.
+                // We will make the C++ side smart enough to handle resizing internally.
                 _controller.InitializeVideo(newWidth, newHeight);
 
-                // Update the UI panel size to match.
                 VideoPanel.Width = newWidth;
                 VideoPanel.Height = newHeight;
             });
@@ -165,9 +163,19 @@ namespace uwpscrcpy
 
         private void Log(string msg)
         {
+            // OPTIMIZATION: Don't await. Fire and forget to unblock execution immediately.
+            // Also, don't update UI for every single log if it's spamming.
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, () =>
             {
-                if (LogBlock.Text.Length > 4000) LogBlock.Text = LogBlock.Text.Substring(0, 2000);
+                // Simple ring-buffer style text trimming is expensive on strings.
+                // Just append, and clear only when very large.
+                if (LogBlock.Text.Length > 2000)
+                {
+                    LogBlock.Text = ""; // Clearing is faster than Substring on low RAM
+                }
+
+                // Use StringBuilder internally if you were doing complex formatting, 
+                // but here just concatenation is "okay" provided we don't do it 60 times a second.
                 string time = DateTime.Now.ToString("HH:mm:ss");
                 LogBlock.Text = $"[{time}] {msg}\n" + LogBlock.Text;
             });
