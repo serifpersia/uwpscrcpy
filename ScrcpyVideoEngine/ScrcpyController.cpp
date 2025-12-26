@@ -88,9 +88,10 @@ std::string Base64Encode(const uint8_t* buf, size_t bufLen) {
 
 
 ScrcpyController::ScrcpyController()
-	: m_socket(INVALID_SOCKET), m_running(false), m_isInitialized(false), m_recvAction(nullptr), m_decoderAction(nullptr), m_connectPromise(nullptr),
-	m_localIdCounter(1), m_videoLocalId(0), m_controlLocalId(0), m_serverLocalId(0), m_videoStage(0),
-	m_videoReadPos(0), m_authAttempted(false), m_dispatcher(nullptr), m_width(0), m_height(0), m_baselinePts(-1), m_resetToken(0)
+	: m_socket(INVALID_SOCKET), m_running(false), m_isInitialized(false), m_recvAction(nullptr), 
+	m_decoderAction(nullptr), m_connectPromise(nullptr), m_enableVideo(true), m_localIdCounter(1), 
+	m_videoLocalId(0), m_controlLocalId(0), m_serverLocalId(0), m_videoStage(0),m_videoReadPos(0), 
+	m_authAttempted(false), m_dispatcher(nullptr), m_width(0), m_height(0), m_baselinePts(-1), m_resetToken(0)
 {
 	MFStartup(MF_VERSION);
 	m_recvBuffer.resize(65536 + 24);
@@ -240,27 +241,33 @@ void ScrcpyController::DeployServer(const Array<byte>^ jarData) {
 	}
 }
 
-void ScrcpyController::StartScrcpy(int bitRate, int maxSize, int maxFps) {
+void ScrcpyController::StartScrcpy(int bitRate, int maxSize, int maxFps, bool video, bool uhid) {
 	m_scid = GenerateScid();
 	m_videoStage = 1;
 	m_videoReadPos = 0;
+	m_enableVideo = video;
+	m_enableUhid = uhid; // <--- Store it
 
 	m_pendingConfig.clear();
-
 	m_videoBuffer.clear();
-	// OPTIMIZATION: Pre-allocate 2MB. 
-	// This prevents the vector from constantly re-allocating heap memory 
-	// as the stream comes in.
 	m_videoBuffer.reserve(2 * 1024 * 1024);
 
 	OpenStream("reverse:forward:localabstract:scrcpy_" + m_scid + ";tcp:27183");
 	std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-	std::string serverArgs = "log_level=info scid=" + m_scid + " tunnel_forward=false video=true audio=false control=true cleanup=true ";
+	std::string vidStr = video ? "true" : "false";
+
+	std::string serverArgs = "log_level=info scid=" + m_scid + " tunnel_forward=false audio=false control=true cleanup=true ";
+	serverArgs += "video=" + vidStr + " ";
 	serverArgs += "video_bit_rate=" + std::to_string(bitRate) + " ";
 	serverArgs += "max_size=" + std::to_string(maxSize) + " ";
 	serverArgs += "max_fps=" + std::to_string(maxFps) + " ";
 	serverArgs += "send_device_meta=true send_codec_meta=true ";
+
+	// --- FIX: Pass mouse argument ---
+	if (uhid) {
+		serverArgs += "mouse=uhid ";
+	}
 
 	std::string cmd = "shell:CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 3.3.3 " + serverArgs;
 	m_serverLocalId = OpenStream(cmd);
@@ -359,8 +366,23 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 	case A_OPEN: {
 		uint32_t rid = a0, lid = ++m_localIdCounter;
 		{ std::lock_guard<std::mutex> lock(m_mapMutex); m_localToRemote[lid] = rid; }
-		if (m_videoLocalId == 0) m_videoLocalId = lid; else m_controlLocalId = lid;
+
+		if (m_enableVideo) {
+			if (m_videoLocalId == 0) m_videoLocalId = lid;
+			else m_controlLocalId = lid;
+		}
+		else {
+			m_controlLocalId = lid;
+			m_videoLocalId = 0;
+		}
+
 		SendPacket(A_OKAY, rid, lid, nullptr, 0);
+
+		// --- NEW: Auto-Enable Mouse when connection is ready ---
+		if (m_enableUhid && lid == m_controlLocalId) {
+			SendHidCreateMouse();
+		}
+		// -------------------------------------------------------
 		break;
 	}
 	case A_OKAY: {
@@ -370,11 +392,15 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 		break;
 	}
 	case A_WRTE: {
+		// Always acknowledge the write immediately
 		SendPacket(A_OKAY, a0, a1, nullptr, 0);
+
 		if (a1 == m_serverLocalId) {
-			//Log("[SERVER] " + std::string((char*)payload, dlen));
+			// Server stdout logging (optional)
+			// Log("[SERVER] " + std::string((char*)payload, dlen));
 		}
-		else if (a1 == m_videoLocalId) {
+		// ONLY process video data if Video is enabled AND the ID matches the video stream
+		else if (m_enableVideo && a1 == m_videoLocalId) {
 			m_videoBuffer.insert(m_videoBuffer.end(), payload, payload + dlen);
 			bool work = true;
 			while (work) {
@@ -382,58 +408,66 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 				size_t available = m_videoBuffer.size() - m_videoReadPos;
 				uint8_t* ptr = m_videoBuffer.data() + m_videoReadPos;
 
+				// Stage 1: Device Name (64 bytes) - Skip
 				if (m_videoStage == 1 && available >= 64) {
-					m_videoReadPos += 64; m_videoStage = 2; work = true;
+					m_videoReadPos += 64;
+					m_videoStage = 2;
+					work = true;
 				}
+				// Stage 2: Resolution Metadata (12 bytes)
 				else if (m_videoStage == 2 && available >= 12) {
+					// Format: [CodecID 4][Width 4][Height 4]
 					uint32_t w = ReadBE32(ptr + 4);
 					uint32_t h = ReadBE32(ptr + 8);
+
 					if (m_dispatcher) {
 						m_dispatcher->RunAsync(CoreDispatcherPriority::Normal, ref new DispatchedHandler([this, w, h]() {
 							OnResolutionChanged(w, h);
 						}));
 					}
-					m_videoReadPos += 12; m_videoStage = 3; work = true;
+					m_videoReadPos += 12;
+					m_videoStage = 3;
+					work = true;
 				}
+				// Stage 3: Video Frame
 				else if (m_videoStage == 3 && available >= 12) {
 					uint64_t ptsData = ReadBE64(ptr);
-					uint32_t pSize = ReadBE32(ptr + 8);
+					uint32_t pSize = ReadBE32(ptr + 8); // Packet Size
+
 					if (available >= (12 + pSize)) {
 						bool isConfig = (ptsData & 0x8000000000000000) != 0;
 						int64_t ptsUs = ptsData & 0x3FFFFFFFFFFFFFFF;
 						const uint8_t* packetStart = ptr + 12;
 
 						if (isConfig) {
+							// Store SPS/PPS for the next IDR frame
 							m_pendingConfig.assign(packetStart, packetStart + pSize);
 						}
 						else {
-
 							DWORD configSize = (DWORD)m_pendingConfig.size();
 							DWORD totalSize = pSize + configSize;
 
-							// 2. Create DirectX Buffer DIRECTLY (No WinRT, no std::vector copies)
+							// Create DirectX Buffer directly
 							ComPtr<IMFMediaBuffer> mediaBuffer;
 							HRESULT hr = MFCreateMemoryBuffer(totalSize, &mediaBuffer);
 
 							if (SUCCEEDED(hr)) {
 								BYTE* dest = nullptr;
-								// Lock the buffer to write to it directly
 								mediaBuffer->Lock(&dest, nullptr, nullptr);
 
-								// Copy Config if present (SPS/PPS)
+								// Prepend Config if available
 								if (configSize > 0) {
 									memcpy(dest, m_pendingConfig.data(), configSize);
 									dest += configSize;
 									m_pendingConfig.clear();
 								}
 
-								// Copy Video Payload directly from the recv buffer
+								// Copy Frame Data
 								memcpy(dest, packetStart, pSize);
 
 								mediaBuffer->Unlock();
 								mediaBuffer->SetCurrentLength(totalSize);
 
-								// Send to Decoder
 								PushFrame(mediaBuffer, ptsUs);
 							}
 						}
@@ -443,6 +477,12 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 				}
 			}
 			if (work) CompactVideoBuffer();
+		}
+		else if (a1 == m_controlLocalId) {
+			// In Controls-Only mode, metadata arrives here.
+			// Since we don't need to parse it for video, we simply do nothing.
+			// The packet is acknowledged (A_OKAY sent above) and dropped, 
+			// keeping the connection alive without corrupting buffers.
 		}
 		break;
 	}
@@ -852,4 +892,168 @@ void ScrcpyController::CreateSwapChain(uint32_t width, uint32_t height) {
 
 	factory->CreateSwapChainForComposition(m_d3dDevice.Get(), &desc, nullptr, &m_swapChain);
 	m_panelNative->SetSwapChain(m_swapChain.Get());
+}
+
+// [ScrcpyController.cpp] - Add these new implementations
+
+// --- Private Helpers ---
+
+void ScrcpyController::WriteBE32(uint8_t* b, uint32_t val) {
+	b[0] = (uint8_t)(val >> 24);
+	b[1] = (uint8_t)(val >> 16);
+	b[2] = (uint8_t)(val >> 8);
+	b[3] = (uint8_t)val;
+}
+
+void ScrcpyController::WriteBE16(uint8_t* b, uint16_t val) {
+	b[0] = (uint8_t)(val >> 8);
+	b[1] = (uint8_t)val;
+}
+
+bool ScrcpyController::SendControlMsg(const std::vector<uint8_t>& msg) {
+	if (!m_running || m_controlLocalId == 0) return false;
+
+	// 1. Look up the Remote ID for the Control Stream
+	uint32_t remoteId = 0;
+	{
+		std::lock_guard<std::mutex> lock(m_mapMutex);
+		auto it = m_localToRemote.find(m_controlLocalId);
+		if (it != m_localToRemote.end()) {
+			remoteId = it->second;
+		}
+	}
+
+	if (remoteId == 0) return false; // Control stream not ready yet
+
+	// 2. Wrap in ADB A_WRTE packet
+	// A_WRTE: arg0 = local_id, arg1 = remote_id
+	return SendPacket(A_WRTE, m_controlLocalId, remoteId, msg.data(), msg.size());
+}
+
+
+// --- Public Control Methods ---
+
+void ScrcpyController::InjectTouch(int action, int pointerId, int x, int y, int width, int height, float pressure, int buttons) {
+	// Protocol: [TYPE 1][ACTION 1][PTR_ID 8][X 4][Y 4][W 2][H 2][PRESSURE 2][BUTTONS 4]
+	// Total: 1 + 1 + 8 + 4 + 4 + 2 + 2 + 2 + 4 = 28 bytes (+ 4 padding?) -> 32 bytes usually
+
+	std::vector<uint8_t> p(32); // 32 bytes fixed size for touch
+	p[0] = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
+	p[1] = (uint8_t)action;
+
+	// Pointer ID (8 bytes) - Using just the lower 32 bits for now as int, padded
+	p[2] = 0; p[3] = 0; p[4] = 0; p[5] = 0;
+	WriteBE32(&p[6], (uint32_t)pointerId);
+
+	WriteBE32(&p[10], (uint32_t)x);
+	WriteBE32(&p[14], (uint32_t)y);
+	WriteBE16(&p[18], (uint16_t)width);
+	WriteBE16(&p[20], (uint16_t)height);
+
+	// Pressure (0 to 1 float -> 0 to 65535 uint16)
+	uint16_t pressureFixed = (uint16_t)(pressure * 65535.0f);
+	WriteBE16(&p[22], pressureFixed);
+
+	WriteBE32(&p[24], (uint32_t)buttons);
+
+	SendControlMsg(p);
+}
+
+void ScrcpyController::InjectScroll(int x, int y, int width, int height, int hScroll, int vScroll, int buttons) {
+	// Protocol: [TYPE 1][X 4][Y 4][W 2][H 2][SCROLL_X 2][SCROLL_Y 2][BUTTONS 4]
+	// Total: 21 bytes
+
+	std::vector<uint8_t> p(21);
+	p[0] = SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT;
+
+	WriteBE32(&p[1], (uint32_t)x);
+	WriteBE32(&p[5], (uint32_t)y);
+	WriteBE16(&p[9], (uint16_t)width);
+	WriteBE16(&p[11], (uint16_t)height);
+	WriteBE16(&p[13], (uint16_t)hScroll); // Signed 16-bit
+	WriteBE16(&p[15], (uint16_t)vScroll); // Signed 16-bit
+	WriteBE32(&p[17], (uint32_t)buttons);
+
+	SendControlMsg(p);
+}
+
+void ScrcpyController::InjectBackOrScreenOn(int action) {
+	// Protocol: [TYPE 1][ACTION 1]
+	std::vector<uint8_t> p(2);
+	p[0] = SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON;
+	p[1] = (uint8_t)action; // 0=down, 1=up
+
+	SendControlMsg(p);
+}
+
+
+// --- UHID (Mouse Mode) Methods ---
+
+void ScrcpyController::EnableUhidMouse(bool enable) {
+	if (enable) {
+		SendHidCreateMouse();
+	}
+	else {
+		SendHidDestroyMouse();
+	}
+}
+
+void ScrcpyController::SendHidCreateMouse() {
+	// Protocol: [TYPE 1][ID 2][RET_SIZE 2]... [DESC_SIZE 2][DESC BYTES]
+
+	size_t descLen = sizeof(SC_HID_MOUSE_REPORT_DESC);
+	// Header size: 1 (type) + 2 (id) + 2 (res_ret_size) + 2 (res_req_size) + 1 (name_len=0) + 2 (desc_len)
+	size_t headerLen = 10;
+
+	std::vector<uint8_t> p(headerLen + descLen);
+
+	int offset = 0;
+	p[offset++] = SC_CONTROL_MSG_TYPE_UHID_CREATE;
+	WriteBE16(&p[offset], SC_HID_ID_MOUSE); offset += 2;
+	WriteBE16(&p[offset], 0); offset += 2; // Report return size
+	WriteBE16(&p[offset], 0); offset += 2; // Report req size
+	p[offset++] = 0; // Name length (0)
+
+	WriteBE16(&p[offset], (uint16_t)descLen); offset += 2;
+	memcpy(&p[offset], SC_HID_MOUSE_REPORT_DESC, descLen);
+
+	SendControlMsg(p);
+}
+
+void ScrcpyController::InjectUhidInput(int buttons, int dx, int dy, int vScroll, int hScroll) {
+	// Report format defined in SC_HID_MOUSE_REPORT_DESC
+	// 5 bytes: [Buttons][X][Y][WheelV][WheelH]
+
+	// Clamp values to -127 to 127 (signed byte range)
+	auto clamp = [](int v) -> int8_t {
+		if (v > 127) return 127;
+		if (v < -127) return -127;
+		return (int8_t)v;
+	};
+
+	uint8_t report[5];
+	report[0] = (uint8_t)buttons;
+	report[1] = (uint8_t)clamp(dx);
+	report[2] = (uint8_t)clamp(dy);
+	report[3] = (uint8_t)clamp(vScroll);
+	report[4] = (uint8_t)clamp(hScroll);
+
+	// Protocol: [TYPE 1][ID 2][SIZE 2][PAYLOAD N]
+	std::vector<uint8_t> p(5 + 5);
+
+	int offset = 0;
+	p[offset++] = SC_CONTROL_MSG_TYPE_UHID_INPUT;
+	WriteBE16(&p[offset], SC_HID_ID_MOUSE); offset += 2;
+	WriteBE16(&p[offset], 5); offset += 2; // Payload size
+	memcpy(&p[offset], report, 5);
+
+	SendControlMsg(p);
+}
+
+void ScrcpyController::SendHidDestroyMouse() {
+	std::vector<uint8_t> p(3);
+	p[0] = SC_CONTROL_MSG_TYPE_UHID_DESTROY;
+	WriteBE16(&p[1], SC_HID_ID_MOUSE);
+
+	SendControlMsg(p);
 }

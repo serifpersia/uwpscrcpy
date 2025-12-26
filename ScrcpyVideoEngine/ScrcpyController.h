@@ -19,6 +19,27 @@
 #include <windows.ui.xaml.media.dxinterop.h>
 #include <Windows.Foundation.h>
 
+// Scrcpy Control Protocol Message Types
+#define SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT 2
+#define SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT 3
+#define SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON 4
+#define SC_CONTROL_MSG_TYPE_UHID_CREATE 12
+#define SC_CONTROL_MSG_TYPE_UHID_INPUT 13
+#define SC_CONTROL_MSG_TYPE_UHID_DESTROY 14
+
+// Standard HID Mouse Report Descriptor (Required for UHID mode)
+static const uint8_t SC_HID_MOUSE_REPORT_DESC[] = {
+	0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05,
+	0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x95, 0x05,
+	0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x03, 0x81, 0x01, 0x05,
+	0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F,
+	0x75, 0x08, 0x95, 0x03, 0x81, 0x06, 0x05, 0x0C, 0x0A, 0x38, 0x02,
+	0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06, 0xC0,
+	0xC0,
+};
+
+#define SC_HID_ID_MOUSE 2
+
 namespace Windows { namespace UI { namespace Core { ref class CoreDispatcher; } } }
 
 namespace ScrcpyVideoEngine
@@ -33,6 +54,7 @@ namespace ScrcpyVideoEngine
 		int64_t pts;
 	};
 
+	[Windows::Foundation::Metadata::WebHostHidden]
 	public ref class ScrcpyController sealed
 	{
 	public:
@@ -48,12 +70,29 @@ namespace ScrcpyVideoEngine
 		void SetPanel(Platform::Object^ panel);
 		bool Connect(Platform::String^ ip, int port);
 		void DeployServer(const Platform::Array<byte>^ jarData);
-		void StartScrcpy(int bitRate, int maxSize, int maxFps);
+		void StartScrcpy(int bitRate, int maxSize, int maxFps, bool video, bool uhid);
 		void Stop();
 
 		// --- THIS IS THE FIX ---
 		// Moved from private to public so C# can call it.
 		void InitializeVideo(uint32_t width, uint32_t height);
+
+		// --- NEW: Public Control Methods (Safe Types) ---
+		void InjectTouch(int action, int pointerId, int x, int y, int width, int height, float pressure, int buttons);
+		void InjectScroll(int x, int y, int width, int height, int hScroll, int vScroll, int buttons);
+		void InjectBackOrScreenOn(int action);
+
+		void EnableUhidMouse(bool enable);
+		void InjectUhidInput(int buttons, int dx, int dy, int vScroll, int hScroll);
+
+	internal:
+		// --- FIXED: Internal Helpers (Native Types Allowed Here) ---
+		bool SendControlMsg(const std::vector<uint8_t>& msg);
+		void WriteBE32(uint8_t* buf, uint32_t val);
+		void WriteBE16(uint8_t* buf, uint16_t val);
+		void SendHidCreateMouse();
+		void SendHidDestroyMouse();
+
 
 	private:
 		std::mutex m_renderMutex;
@@ -97,7 +136,6 @@ namespace ScrcpyVideoEngine
 		Microsoft::WRL::ComPtr<ID3D11VideoContext> m_videoContext;
 		Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> m_videoProcessorEnum;
 		Microsoft::WRL::ComPtr<ID3D11VideoProcessor> m_videoProcessor;
-
 		Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> m_cachedOutputView;
 		Microsoft::WRL::ComPtr<ID3D11Texture2D> m_cachedBackBuffer;
 
@@ -120,5 +158,8 @@ namespace ScrcpyVideoEngine
 		bool InitDecoder(uint32_t width, uint32_t height);
 		void CreateSwapChain(uint32_t width, uint32_t height);
 		void ApplyResolutionChange(uint32_t width, uint32_t height);
+
+		bool m_enableVideo;
+		bool m_enableUhid; // <--- ADD THIS
 	};
 }

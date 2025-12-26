@@ -15,6 +15,7 @@ namespace uwpscrcpy
     {
         private readonly ScrcpyController _controller;
         private readonly AdbCrypto _crypto;
+        private InputManager _inputManager; // New Field
 
         public MainPage()
         {
@@ -28,16 +29,13 @@ namespace uwpscrcpy
             _controller.OnLog += (msg) => Log(msg);
             _controller.OnResolutionChanged += Controller_OnResolutionChanged;
         }
+
         private void Controller_OnResolutionChanged(uint newWidth, uint newHeight)
         {
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
                 Log($"Resolution received: {newWidth}x{newHeight}. Updating video subsystem...");
-
-                // REVERT THIS: Call InitializeVideo, not ResizeVideo.
-                // We will make the C++ side smart enough to handle resizing internally.
                 _controller.InitializeVideo(newWidth, newHeight);
-
                 VideoPanel.Width = newWidth;
                 VideoPanel.Height = newHeight;
             });
@@ -74,8 +72,6 @@ namespace uwpscrcpy
         {
             try
             {
-                // --- THIS IS THE CRITICAL FIX ---
-                // STEP 1: We are currently on the UI thread. Read all values from UI controls now.
                 string ip = IpAddressBox.Text;
                 int port = int.Parse(PortBox.Text);
                 int.TryParse(BitRateBox.Text, out int mbps);
@@ -84,42 +80,53 @@ namespace uwpscrcpy
                 int.TryParse(MaxFpsBox.Text, out int maxFps);
                 byte[] jarBytes = GetJarBytes();
 
-                // STEP 2: Perform any other operations that MUST be on the UI thread.
+                bool isVideoEnabled = !ControlsOnlyToggle.IsOn;
+                bool isUhidEnabled = UhidMouseToggle.IsOn;
+
                 _controller.AuthSignCallback = (token) => _crypto.Sign(token);
                 _controller.AuthKeyCallback = () => _crypto.GetPublicKeyBlob();
                 _controller.SetPanel(VideoPanel);
 
-                // STEP 3: Now that we have all the data, switch to a background thread for the
-                // long-running network operations.
+                // Reset Panel Alignment/Size defaults
+                VideoPanel.HorizontalAlignment = HorizontalAlignment.Stretch;
+                VideoPanel.VerticalAlignment = VerticalAlignment.Stretch;
+
                 await Task.Run(() =>
                 {
                     Log("Connecting to ADB...");
-                    // Use the local variables, NOT the UI controls directly.
-                    bool connected = _controller.Connect(ip, port);
-                    if (!connected)
-                    {
-                        // We can log from here because the Log method safely dispatches to the UI thread.
-                        Log("ADB connection failed.");
-                        throw new Exception("ADB Connection Failed"); // Abort the operation
-                    }
+                    if (!_controller.Connect(ip, port)) throw new Exception("ADB Fail");
 
-                    Log("Connected. Deploying server...");
+                    Log("Deploying server...");
                     _controller.DeployServer(jarBytes);
-                    Log("Server deployed.");
 
-                    Log($"Starting scrcpy server (Bitrate: {mbps}Mbps, Size: {maxSize}p, FPS: {maxFps})...");
-                    _controller.StartScrcpy(bitRate, maxSize, maxFps);
+                    Log($"Starting scrcpy (Video: {isVideoEnabled}, UHID: {isUhidEnabled})...");
+                    _controller.StartScrcpy(bitRate, maxSize, maxFps, isVideoEnabled, isUhidEnabled);
                 });
 
-                // After await, we are back on the UI thread. It is safe to update the UI.
+                _inputManager = new InputManager(_controller, VideoPanel, MousePadArea, LeftClickArea, RightClickArea, InvertScrollToggle);
+                _inputManager.RegisterInputHandlers();
+
+                // Note: SetUhidMode is just for the InputManager state now, 
+                // the C++ side handles the creation packet automatically on connect.
+                _inputManager.SetUhidMode(isUhidEnabled);
+
+                // --- FIX: Full Screen Mapping for Controls Only ---
+                if (!isVideoEnabled)
+                {
+                    // Remove hardcoded size. Let it fill the Viewbox/Window.
+                    VideoPanel.Width = 720;
+                    VideoPanel.Height = 1280;
+                    Log("Controls Only Mode: Fullscreen Input Mapping active.");
+                }
+
+                UpdateInterfaceLayout();
                 VolumeControlPanel.Visibility = Visibility.Visible;
                 return true;
             }
             catch (Exception ex)
             {
-                // If anything fails (either on the UI or background thread), this will catch it.
-                Log($"Error starting connection: {ex.Message}");
-                await StopConnectionAsync(); // Ensure we clean up
+                Log($"Error: {ex.Message}");
+                await StopConnectionAsync();
                 return false;
             }
         }
@@ -127,14 +134,57 @@ namespace uwpscrcpy
         private async Task StopConnectionAsync()
         {
             Log("Stopping connection...");
+
+            // Clean up Input
+            if (_inputManager != null)
+            {
+                _inputManager.UnregisterInputHandlers();
+                _inputManager = null;
+            }
+
+            // Stop Network
             await Task.Run(() =>
             {
                 _controller?.Stop();
             });
+
+            // Reset UI
             VolumeControlPanel.Visibility = Visibility.Collapsed;
+            VideoContainer.Visibility = Visibility.Visible;
+            MouseControlContainer.Visibility = Visibility.Collapsed;
+
             Log("Connection stopped.");
         }
 
+        private void UpdateInterfaceLayout()
+        {
+            bool isControlsOnly = ControlsOnlyToggle.IsOn;
+            bool isUhid = UhidMouseToggle.IsOn;
+
+            if (isControlsOnly)
+            {
+                if (isUhid)
+                {
+                    // UHID Mode: Show Mouse Control UI
+                    VideoContainer.Visibility = Visibility.Collapsed;
+                    MouseControlContainer.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    // Normal Controls Mode: 
+                    // We MUST keep VideoContainer VISIBLE so it can receive Pointer Events.
+                    // It will just be a black screen (since no video frames), which is what we want.
+                    VideoContainer.Visibility = Visibility.Visible;
+                    MouseControlContainer.Visibility = Visibility.Collapsed;
+                }
+            }
+            else
+            {
+                // Video Mode
+                VideoContainer.Visibility = Visibility.Visible;
+                MouseControlContainer.Visibility = Visibility.Collapsed;
+            }
+        }
 
         private byte[] GetJarBytes()
         {
@@ -142,7 +192,7 @@ namespace uwpscrcpy
             string resourceName = "uwpscrcpy.Vendor.scrcpy-server.jar";
             using (var stream = assembly.GetManifestResourceStream(resourceName))
             {
-                if (stream == null) throw new Exception("scrcpy-server.jar not found in embedded resources.");
+                if (stream == null) throw new Exception("scrcpy-server.jar not found.");
                 byte[] buffer = new byte[stream.Length];
                 stream.Read(buffer, 0, buffer.Length);
                 return buffer;
@@ -163,19 +213,9 @@ namespace uwpscrcpy
 
         private void Log(string msg)
         {
-            // OPTIMIZATION: Don't await. Fire and forget to unblock execution immediately.
-            // Also, don't update UI for every single log if it's spamming.
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, () =>
             {
-                // Simple ring-buffer style text trimming is expensive on strings.
-                // Just append, and clear only when very large.
-                if (LogBlock.Text.Length > 2000)
-                {
-                    LogBlock.Text = ""; // Clearing is faster than Substring on low RAM
-                }
-
-                // Use StringBuilder internally if you were doing complex formatting, 
-                // but here just concatenation is "okay" provided we don't do it 60 times a second.
+                if (LogBlock.Text.Length > 2000) LogBlock.Text = "";
                 string time = DateTime.Now.ToString("HH:mm:ss");
                 LogBlock.Text = $"[{time}] {msg}\n" + LogBlock.Text;
             });
@@ -210,17 +250,27 @@ namespace uwpscrcpy
             {
                 UhidMouseToggle.IsEnabled = ControlsOnlyToggle.IsOn;
                 if (!ControlsOnlyToggle.IsOn) UhidMouseToggle.IsOn = false;
+
+                // If we toggle this while connected, update the layout immediately
+                if (_controller != null) UpdateInterfaceLayout();
             }
         }
 
         private void UhidMouseToggle_Toggled(object sender, RoutedEventArgs e)
         {
             if (InvertScrollToggle != null) InvertScrollToggle.IsEnabled = UhidMouseToggle.IsOn;
+
+            // If connected, switch the input mode on the fly
+            if (_inputManager != null)
+            {
+                _inputManager.SetUhidMode(UhidMouseToggle.IsOn);
+                UpdateInterfaceLayout();
+            }
         }
 
         private void VolumeSlider_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
-            Log("Volume control not yet implemented in this version.");
+            Log("Volume control not implemented in this step.");
         }
     }
 }
