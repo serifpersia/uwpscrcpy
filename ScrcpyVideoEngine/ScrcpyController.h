@@ -85,6 +85,9 @@ namespace ScrcpyVideoEngine
 		void EnableUhidMouse(bool enable);
 		void InjectUhidInput(int buttons, int dx, int dy, int vScroll, int hScroll);
 
+		Windows::Foundation::IAsyncOperation<int>^ GetVolumeAsync();
+		void SetVolume(int volume);
+
 	internal:
 		// --- FIXED: Internal Helpers (Native Types Allowed Here) ---
 		bool SendControlMsg(const std::vector<uint8_t>& msg);
@@ -161,5 +164,10 @@ namespace ScrcpyVideoEngine
 
 		bool m_enableVideo;
 		bool m_enableUhid; // <--- ADD THIS
+
+		std::mutex m_shellMutex;
+		std::map<uint32_t, std::shared_ptr<std::string>> m_shellBuffers;
+
+		std::string ExecuteShellAndRead(const std::string& cmd);
 	};
 }

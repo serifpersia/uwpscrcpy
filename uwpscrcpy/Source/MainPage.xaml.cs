@@ -1,6 +1,8 @@
 using System;
 using System.Reflection;
 using System.Threading.Tasks;
+using Windows.System; // <--- Add this
+using Windows.System.Display; // <--- Add this
 using Windows.UI.Core;
 using Windows.UI.ViewManagement;
 using Windows.UI.Xaml;
@@ -17,6 +19,8 @@ namespace uwpscrcpy
         private readonly AdbCrypto _crypto;
         private InputManager _inputManager; // New Field
 
+        private readonly DisplayRequest _displayRequest = new DisplayRequest();
+
         public MainPage()
         {
             this.InitializeComponent();
@@ -28,6 +32,10 @@ namespace uwpscrcpy
 
             _controller.OnLog += (msg) => Log(msg);
             _controller.OnResolutionChanged += Controller_OnResolutionChanged;
+
+            // --- NEW: Handle Back Button & Escape Key ---
+            SystemNavigationManager.GetForCurrentView().BackRequested += MainPage_BackRequested;
+            Window.Current.CoreWindow.KeyDown += CoreWindow_KeyDown;
         }
 
         private void Controller_OnResolutionChanged(uint newWidth, uint newHeight)
@@ -80,14 +88,17 @@ namespace uwpscrcpy
                 int.TryParse(MaxFpsBox.Text, out int maxFps);
                 byte[] jarBytes = GetJarBytes();
 
-                bool isVideoEnabled = !ControlsOnlyToggle.IsOn;
-                bool isUhidEnabled = UhidMouseToggle.IsOn;
+                // REFACTORED LOGIC:
+                // If Controls Only is ON -> Video is OFF, UHID is ON.
+                // If Controls Only is OFF -> Video is ON, UHID is OFF (Standard Touch).
+                bool isControlsOnly = ControlsOnlyToggle.IsOn;
+                bool isVideoEnabled = !isControlsOnly;
+                bool isUhidEnabled = isControlsOnly;
 
                 _controller.AuthSignCallback = (token) => _crypto.Sign(token);
                 _controller.AuthKeyCallback = () => _crypto.GetPublicKeyBlob();
                 _controller.SetPanel(VideoPanel);
 
-                // Reset Panel Alignment/Size defaults
                 VideoPanel.HorizontalAlignment = HorizontalAlignment.Stretch;
                 VideoPanel.VerticalAlignment = VerticalAlignment.Stretch;
 
@@ -105,22 +116,25 @@ namespace uwpscrcpy
 
                 _inputManager = new InputManager(_controller, VideoPanel, MousePadArea, LeftClickArea, RightClickArea, InvertScrollToggle);
                 _inputManager.RegisterInputHandlers();
-
-                // Note: SetUhidMode is just for the InputManager state now, 
-                // the C++ side handles the creation packet automatically on connect.
                 _inputManager.SetUhidMode(isUhidEnabled);
 
-                // --- FIX: Full Screen Mapping for Controls Only ---
-                if (!isVideoEnabled)
+                // Handle Layout for Controls Only
+                if (isControlsOnly)
                 {
-                    // Remove hardcoded size. Let it fill the Viewbox/Window.
-                    VideoPanel.Width = 720;
-                    VideoPanel.Height = 1280;
-                    Log("Controls Only Mode: Fullscreen Input Mapping active.");
+                    VideoPanel.Width = double.NaN;
+                    VideoPanel.Height = double.NaN;
+                    Log("Controls Only (UHID) Active.");
                 }
 
                 UpdateInterfaceLayout();
                 VolumeControlPanel.Visibility = Visibility.Visible;
+
+                _displayRequest.RequestActive();
+
+                // Get Initial Volume
+                int currentVol = await _controller.GetVolumeAsync();
+                if (currentVol != -1) VolumeSlider.Value = currentVol;
+
                 return true;
             }
             catch (Exception ex)
@@ -134,6 +148,8 @@ namespace uwpscrcpy
         private async Task StopConnectionAsync()
         {
             Log("Stopping connection...");
+
+            _displayRequest.RequestRelease();
 
             // Clean up Input
             if (_inputManager != null)
@@ -159,24 +175,12 @@ namespace uwpscrcpy
         private void UpdateInterfaceLayout()
         {
             bool isControlsOnly = ControlsOnlyToggle.IsOn;
-            bool isUhid = UhidMouseToggle.IsOn;
 
             if (isControlsOnly)
             {
-                if (isUhid)
-                {
-                    // UHID Mode: Show Mouse Control UI
-                    VideoContainer.Visibility = Visibility.Collapsed;
-                    MouseControlContainer.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    // Normal Controls Mode: 
-                    // We MUST keep VideoContainer VISIBLE so it can receive Pointer Events.
-                    // It will just be a black screen (since no video frames), which is what we want.
-                    VideoContainer.Visibility = Visibility.Visible;
-                    MouseControlContainer.Visibility = Visibility.Collapsed;
-                }
+                // Always show Mouse UI in Controls Only mode now
+                VideoContainer.Visibility = Visibility.Collapsed;
+                MouseControlContainer.Visibility = Visibility.Visible;
             }
             else
             {
@@ -207,8 +211,7 @@ namespace uwpscrcpy
             MaxSizeBox.IsEnabled = enabled;
             MaxFpsBox.IsEnabled = enabled;
             ControlsOnlyToggle.IsEnabled = enabled;
-            UhidMouseToggle.IsEnabled = enabled && ControlsOnlyToggle.IsOn;
-            InvertScrollToggle.IsEnabled = enabled && UhidMouseToggle.IsOn;
+            InvertScrollToggle.IsEnabled = enabled && ControlsOnlyToggle.IsOn;
         }
 
         private void Log(string msg)
@@ -221,9 +224,22 @@ namespace uwpscrcpy
             });
         }
 
-        private void HamburgerButton_Click(object sender, RoutedEventArgs e)
+        private async void HamburgerButton_Click(object sender, RoutedEventArgs e)
         {
             MainSplitView.IsPaneOpen = !MainSplitView.IsPaneOpen;
+
+            if (MainSplitView.IsPaneOpen && _controller != null && ConnectToggle.IsChecked == true)
+            {
+                // Refresh Volume
+                int vol = await _controller.GetVolumeAsync();
+                if (vol != -1)
+                {
+                    // Avoid triggering the set event
+                    VolumeSlider.PointerCaptureLost -= VolumeSlider_PointerCaptureLost;
+                    VolumeSlider.Value = vol;
+                    VolumeSlider.PointerCaptureLost += VolumeSlider_PointerCaptureLost;
+                }
+            }
         }
 
         private void FullScreenButton_Click(object sender, RoutedEventArgs e)
@@ -244,33 +260,58 @@ namespace uwpscrcpy
             }
         }
 
-        private void ControlsOnlyToggle_Toggled(object sender, RoutedEventArgs e)
+        private void MainPage_BackRequested(object sender, BackRequestedEventArgs e)
         {
-            if (UhidMouseToggle != null)
+            var view = ApplicationView.GetForCurrentView();
+            if (view.IsFullScreenMode)
             {
-                UhidMouseToggle.IsEnabled = ControlsOnlyToggle.IsOn;
-                if (!ControlsOnlyToggle.IsOn) UhidMouseToggle.IsOn = false;
+                // Exit Fullscreen
+                view.ExitFullScreenMode();
+                HamburgerButton.Visibility = Visibility.Visible;
 
-                // If we toggle this while connected, update the layout immediately
-                if (_controller != null) UpdateInterfaceLayout();
+                // Mark as handled so the OS doesn't suspend/close the app
+                e.Handled = true;
             }
         }
 
-        private void UhidMouseToggle_Toggled(object sender, RoutedEventArgs e)
+        private void CoreWindow_KeyDown(CoreWindow sender, KeyEventArgs args)
         {
-            if (InvertScrollToggle != null) InvertScrollToggle.IsEnabled = UhidMouseToggle.IsOn;
-
-            // If connected, switch the input mode on the fly
-            if (_inputManager != null)
+            // Check for Escape Key
+            if (args.VirtualKey == VirtualKey.Escape)
             {
-                _inputManager.SetUhidMode(UhidMouseToggle.IsOn);
+                var view = ApplicationView.GetForCurrentView();
+                if (view.IsFullScreenMode)
+                {
+                    view.ExitFullScreenMode();
+                    HamburgerButton.Visibility = Visibility.Visible;
+                    args.Handled = true;
+                }
+            }
+        }
+
+        private void ControlsOnlyToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            // Update Invert Scroll availability based on the mode
+            if (InvertScrollToggle != null)
+            {
+                InvertScrollToggle.IsEnabled = ControlsOnlyToggle.IsOn;
+            }
+
+            // Live Update if connected
+            if (_controller != null)
+            {
                 UpdateInterfaceLayout();
             }
         }
 
         private void VolumeSlider_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
-            Log("Volume control not implemented in this step.");
+            if (_controller != null)
+            {
+                int vol = (int)VolumeSlider.Value;
+                Log($"Setting volume to {vol}...");
+                _controller.SetVolume(vol);
+            }
         }
     }
 }

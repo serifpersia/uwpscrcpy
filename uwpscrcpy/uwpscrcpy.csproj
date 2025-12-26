@@ -129,7 +129,7 @@
     <RestoreProjectStyle>PackageReference</RestoreProjectStyle>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="InputManager.cs" />
+    <Compile Include="Source\InputManager.cs" />
     <Compile Include="Source\AdbCrypto.cs" />
     <Compile Include="Source\App.xaml.cs">
       <DependentUpon>App.xaml</DependentUpon>

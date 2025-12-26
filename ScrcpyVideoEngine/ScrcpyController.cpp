@@ -7,6 +7,7 @@
 #include <mfapi.h>
 #include <mferror.h>
 #include <codecapi.h>
+#include <regex>
 
 using namespace ScrcpyVideoEngine;
 using namespace Platform;
@@ -378,11 +379,24 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 
 		SendPacket(A_OKAY, rid, lid, nullptr, 0);
 
-		// --- NEW: Auto-Enable Mouse when connection is ready ---
+		// --- FIX: Add a delay before initializing HID ---
+		// If we send this too fast, the server might drop it.
 		if (m_enableUhid && lid == m_controlLocalId) {
-			SendHidCreateMouse();
+
+			// Log that we intend to start mouse mode
+			Log("Control stream connected. Initializing UHID Mouse in 200ms...");
+
+			// Run in background to avoid blocking the receiver loop
+			ThreadPool::RunAsync(ref new WorkItemHandler([this](IAsyncAction^) {
+				// Wait for server to be ready
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+				if (m_running) {
+					SendHidCreateMouse();
+					Log("UHID Mouse Creation Packet Sent.");
+				}
+			}));
 		}
-		// -------------------------------------------------------
 		break;
 	}
 	case A_OKAY: {
@@ -483,6 +497,13 @@ void ScrcpyController::HandlePacket(uint32_t cmd, uint32_t a0, uint32_t a1, uint
 			// Since we don't need to parse it for video, we simply do nothing.
 			// The packet is acknowledged (A_OKAY sent above) and dropped, 
 			// keeping the connection alive without corrupting buffers.
+		}
+		else {
+			std::lock_guard<std::mutex> lock(m_shellMutex);
+			if (m_shellBuffers.count(a1)) {
+				// Append payload to the string buffer for this stream ID
+				m_shellBuffers[a1]->append((char*)payload, dlen);
+			}
 		}
 		break;
 	}
@@ -1056,4 +1077,74 @@ void ScrcpyController::SendHidDestroyMouse() {
 	WriteBE16(&p[1], SC_HID_ID_MOUSE);
 
 	SendControlMsg(p);
+}
+// [ScrcpyController.cpp] - Add at the end
+
+#include <regex> // Ensure this is at the top of the file
+
+Windows::Foundation::IAsyncOperation<int>^ ScrcpyController::GetVolumeAsync() {
+	return concurrency::create_async([this]() -> int {
+		try {
+			// Execute "media volume --get" and wait for result
+			std::string output = ExecuteShellAndRead("media volume --get");
+
+			// Output format: "volume is 10 in range [0..15]"
+			std::regex re("volume is (\\d+)");
+			std::smatch match;
+			if (std::regex_search(output, match, re) && match.size() > 1) {
+				return std::stoi(match.str(1));
+			}
+		}
+		catch (...) {
+			Log("Failed to parse volume.");
+		}
+		return -1; // Error or Not Found
+	});
+}
+
+void ScrcpyController::SetVolume(int volume) {
+	// Fire and forget command
+	std::string cmd = "media volume --stream 3 --set " + std::to_string(volume);
+
+	// Run in background so we don't block UI thread waiting for the 'close' confirmation
+	ThreadPool::RunAsync(ref new WorkItemHandler([this, cmd](IAsyncAction^) {
+		ExecuteShellCommand(cmd);
+	}));
+}
+
+std::string ScrcpyController::ExecuteShellAndRead(const std::string& command) {
+	if (!m_running) return "";
+
+	uint32_t lid = ++m_localIdCounter;
+	auto buffer = std::make_shared<std::string>();
+
+	// 1. Register buffer and close-waiter
+	auto cl = new std::promise<bool>();
+	{
+		std::lock_guard<std::mutex> lock1(m_pendingMutex);
+		m_pendingCloses[lid] = cl;
+
+		std::lock_guard<std::mutex> lock2(m_shellMutex);
+		m_shellBuffers[lid] = buffer;
+	}
+
+	// 2. Send Request
+	std::string req = "shell:" + command + '\0';
+	SendPacket(A_OPEN, lid, 0, req.data(), (uint32_t)req.size());
+
+	// 3. Wait for stream to close (A_CLSE)
+	// This implies the command finished executing and flushing output.
+	bool success = cl->get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+
+	// 4. Cleanup
+	{
+		std::lock_guard<std::mutex> lock1(m_pendingMutex);
+		if (m_pendingCloses.count(lid)) m_pendingCloses.erase(lid);
+
+		std::lock_guard<std::mutex> lock2(m_shellMutex);
+		if (m_shellBuffers.count(lid)) m_shellBuffers.erase(lid);
+	}
+	delete cl;
+
+	return success ? *buffer : "";
 }

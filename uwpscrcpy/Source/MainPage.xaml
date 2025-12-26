@@ -68,16 +68,19 @@
                                     </Grid>
                                 </StackPanel>
                             </Border>
-
                             <Border Background="{ThemeResource SurfaceBrush}" Padding="16" Margin="0,0,0,12">
                                 <StackPanel>
                                     <TextBlock Text="Options" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                                    <ToggleSwitch x:Name="ControlsOnlyToggle" Header="Controls Only Mode" IsOn="False" Toggled="ControlsOnlyToggle_Toggled"/>
-                                    <ToggleSwitch x:Name="UhidMouseToggle" Header="Enable Mouse (UHID)" IsOn="False" IsEnabled="False" Toggled="UhidMouseToggle_Toggled"/>
-                                    <ToggleSwitch x:Name="InvertScrollToggle" Header="Invert Scroll Direction" IsOn="False" IsEnabled="False"/>
+                                    <ToggleSwitch x:Name="ControlsOnlyToggle" 
+                                                  Header="Controls Only Mode (UHID)" 
+                                                  IsOn="False" 
+                                                  Toggled="ControlsOnlyToggle_Toggled"/>
+                                    <ToggleSwitch x:Name="InvertScrollToggle" 
+                                                  Header="Invert Scroll Direction" 
+                                                  IsOn="False" 
+                                                  IsEnabled="False"/>
                                 </StackPanel>
                             </Border>
-
                             <Border x:Name="VolumeControlPanel"
                                     Background="{ThemeResource SurfaceBrush}"
                                     Padding="16"

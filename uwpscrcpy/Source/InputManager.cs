@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Input;
 using Windows.Foundation;
-using Windows.UI.Xaml;
 using ScrcpyVideoEngine;
 
 namespace uwpscrcpy
@@ -247,7 +246,7 @@ namespace uwpscrcpy
             }
 
             // Sensitivity factor
-            double MOUSE_SENSITIVITY = 1.25;
+            double MOUSE_SENSITIVITY = 1.0;
             double rawDX = (currentPosition.X - previousPosition.X) * MOUSE_SENSITIVITY;
             double rawDY = (currentPosition.Y - previousPosition.Y) * MOUSE_SENSITIVITY;
             _pointerPositions[ptrId] = currentPosition;
