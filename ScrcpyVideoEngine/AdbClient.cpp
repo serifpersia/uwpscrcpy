@@ -30,13 +30,23 @@ namespace ScrcpyVideoEngine {
 		sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_addr.s_addr = inet_addr(ip.c_str()); addr.sin_port = htons(port);
 		if (connect(m_socket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) { closesocket(m_socket); m_socket = INVALID_SOCKET; WSACleanup(); return false; }
 		m_running = true;
+
+		if (m_connectPromise) { delete m_connectPromise; m_connectPromise = nullptr; }
 		m_connectPromise = new std::promise<bool>();
+
 		auto fut = m_connectPromise->get_future();
 		m_recvThread = std::thread(&AdbClient::ReceiveLoop, this);
 		std::string host = "host::\0";
 		SendPacket(A_CNXN, 0x01000001, 1024 * 1024, host.data(), (uint32_t)host.size());
-		if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready) return fut.get();
-		Disconnect(); return false;
+
+		if (fut.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+			return fut.get();
+		}
+
+		Disconnect();
+
+		if (m_connectPromise) { delete m_connectPromise; m_connectPromise = nullptr; }
+		return false;
 	}
 
 	void AdbClient::Disconnect() {
@@ -211,8 +221,16 @@ namespace ScrcpyVideoEngine {
 		{ std::lock_guard<std::mutex> lock(m_pendingMutex); m_pendingOpens[lid] = op; m_pendingCloses[lid] = cl; }
 		std::string req = "shell:" + command + '\0';
 		SendPacket(A_OPEN, lid, 0, req.data(), (uint32_t)req.size());
+
 		bool success = op->get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready;
 		if (success) success = cl->get_future().wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+
+		{
+			std::lock_guard<std::mutex> lock(m_pendingMutex);
+			m_pendingOpens.erase(lid);
+			m_pendingCloses.erase(lid);
+		}
+
 		delete op; delete cl;
 		return success;
 	}
@@ -228,11 +246,14 @@ namespace ScrcpyVideoEngine {
 		}
 		std::string req = "shell:" + cmd + '\0';
 		SendPacket(A_OPEN, lid, 0, req.data(), (uint32_t)req.size());
+
 		bool success = cl->get_future().wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+
 		{
-			std::lock_guard<std::mutex> lock1(m_pendingMutex); if (m_pendingCloses.count(lid)) m_pendingCloses.erase(lid);
-			std::lock_guard<std::mutex> lock2(m_shellMutex); if (m_shellBuffers.count(lid)) m_shellBuffers.erase(lid);
+			std::lock_guard<std::mutex> lock1(m_pendingMutex); m_pendingCloses.erase(lid);
+			std::lock_guard<std::mutex> lock2(m_shellMutex); m_shellBuffers.erase(lid);
 		}
+
 		delete cl;
 		return success ? *buffer : "";
 	}

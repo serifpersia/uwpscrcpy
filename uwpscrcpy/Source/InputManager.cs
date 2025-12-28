@@ -23,7 +23,7 @@ namespace uwpscrcpy
         private readonly Dictionary<uint, Point> _pointerPositions = new Dictionary<uint, Point>();
         private bool _isDragging = false;
         private long _lastTapTimestamp = 0;
-        private const int DOUBLE_TAP_THRESHOLD_MS = 200;
+        private const int DOUBLE_TAP_THRESHOLD_MS = 150;
         private double _scrollAccumulatorY = 0;
         private const double SCROLL_SENSITIVITY = 0.025;
         private long _lastTouchSendTime = 0;
@@ -135,24 +135,46 @@ namespace uwpscrcpy
             _controller.InjectTouch(action, ptrId, (int)pos.X, (int)pos.Y, w, h, pressure, buttons);
         }
 
+
         private void VideoSurface_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
         {
             if (_isUhidMouseMode || _controller == null) return;
+
             var point = e.GetCurrentPoint(_videoPanel);
             var pos = point.Position;
             var props = point.Properties;
             int w = (int)_videoPanel.ActualWidth;
             int h = (int)_videoPanel.ActualHeight;
-            float vScrollFloat = (float)props.MouseWheelDelta / 120.0f;
-            if (_invertScrollToggle.IsOn) vScrollFloat = -vScrollFloat;
-            int vScroll = (int)Math.Round(vScrollFloat);
-            if (vScroll == 0 && Math.Abs(props.MouseWheelDelta) > 10) vScroll = props.MouseWheelDelta > 0 ? 1 : -1;
-            if (vScroll != 0)
+
+            const float FIXED_POINT_SCALAR = 2000.0f;
+
+            float scrollUnit = (float)props.MouseWheelDelta / 120.0f;
+
+            if (_invertScrollToggle.IsOn) scrollUnit = -scrollUnit;
+
+            int scrollFixed = (int)(scrollUnit * FIXED_POINT_SCALAR);
+
+            if (scrollFixed != 0)
             {
+                int hScroll = 0;
+                int vScroll = 0;
+
+                if (props.IsHorizontalMouseWheel)
+                {
+                    hScroll = -scrollFixed;
+                }
+                else
+                {
+                    vScroll = scrollFixed;
+                }
+
                 int buttons = 0;
                 if (props.IsLeftButtonPressed) buttons |= MOUSE_BUTTON_LEFT;
-                _controller.InjectScroll((int)pos.X, (int)pos.Y, w, h, 0, vScroll, buttons);
+
+                _controller.InjectScroll((int)pos.X, (int)pos.Y, w, h, hScroll, vScroll, buttons);
             }
+
+            e.Handled = true;
         }
 
         private void MousePadArea_PointerPressed(object sender, PointerRoutedEventArgs e)

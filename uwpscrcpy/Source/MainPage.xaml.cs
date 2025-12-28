@@ -74,8 +74,10 @@ namespace uwpscrcpy
         {
             try
             {
+                if (string.IsNullOrWhiteSpace(IpAddressBox.Text)) throw new Exception("IP Address cannot be empty.");
+                if (!int.TryParse(PortBox.Text, out int port)) throw new Exception("Invalid Port number.");
+
                 string ip = IpAddressBox.Text;
-                int port = int.Parse(PortBox.Text);
                 int.TryParse(BitRateBox.Text, out int mbps);
                 int bitRate = (mbps > 0) ? mbps * 1000000 : 8000000;
                 int.TryParse(MaxSizeBox.Text, out int maxSize);
@@ -95,11 +97,17 @@ namespace uwpscrcpy
 
                 await Task.Run(() =>
                 {
-                    Log("Connecting to ADB...");
-                    if (!_controller.Connect(ip, port)) throw new Exception("ADB Fail");
-                    Log("Deploying server...");
+                    Log($"Attempting connection to {ip}:{port}...");
+                    if (!_controller.Connect(ip, port))
+                    { 
+                        Log("Failed to establish ADB connection. Check IP/Port or Firewalls.");
+                        return;
+                    }
+
+                    Log("Connection established. Deploying server...");
                     _controller.DeployServer(jarBytes);
-                    Log($"Starting scrcpy (Video: {isVideoEnabled}, UHID: {isUhidEnabled})...");
+
+                    Log($"Starting scrcpy protocol...");
                     _controller.StartScrcpy(bitRate, maxSize, maxFps, isVideoEnabled, isUhidEnabled);
                 });
 
@@ -118,13 +126,18 @@ namespace uwpscrcpy
                 VolumeControlPanel.Visibility = Visibility.Visible;
                 _displayRequest.RequestActive();
 
-                int currentVol = await _controller.GetVolumeAsync();
-                if (currentVol != -1) VolumeSlider.Value = currentVol;
+                try
+                {
+                    int currentVol = await _controller.GetVolumeAsync();
+                    if (currentVol != -1) VolumeSlider.Value = currentVol;
+                }
+                catch { }
+
                 return true;
             }
             catch (Exception ex)
             {
-                Log($"Error: {ex.Message}");
+                Log($"CONNECTION FAILED: {ex.Message}");
                 await StopConnectionAsync();
                 return false;
             }
@@ -132,21 +145,32 @@ namespace uwpscrcpy
 
         private async Task StopConnectionAsync()
         {
-            Log("Stopping connection...");
-            _displayRequest.RequestRelease();
-
-            if (_inputManager != null)
+            try
             {
-                _inputManager.UnregisterInputHandlers();
-                _inputManager = null;
+                Log("Stopping connection...");
+                _displayRequest.RequestRelease();
+
+                if (_inputManager != null)
+                {
+                    _inputManager.UnregisterInputHandlers();
+                    _inputManager = null;
+                }
+
+                await Task.Run(() =>
+                {
+                    try { _controller?.Stop(); }
+                    catch (Exception) { }
+                });
+
+                VolumeControlPanel.Visibility = Visibility.Collapsed;
+                VideoContainer.Visibility = Visibility.Visible;
+                MouseControlContainer.Visibility = Visibility.Collapsed;
+                Log("Connection stopped successfully.");
             }
-
-            await Task.Run(() => { _controller?.Stop(); });
-
-            VolumeControlPanel.Visibility = Visibility.Collapsed;
-            VideoContainer.Visibility = Visibility.Visible;
-            MouseControlContainer.Visibility = Visibility.Collapsed;
-            Log("Connection stopped.");
+            catch (Exception ex)
+            {
+                Log($"Error during stop: {ex.Message}");
+            }
         }
 
         private void UpdateInterfaceLayout()
