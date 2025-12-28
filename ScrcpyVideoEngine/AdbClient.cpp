@@ -12,9 +12,14 @@ static const uint8_t SC_HID_MOUSE_REPORT_DESC[] = {
 };
 
 namespace ScrcpyVideoEngine {
-	AdbClient::AdbClient() : m_socket(INVALID_SOCKET), m_running(false), m_connectPromise(nullptr), m_localIdCounter(1), m_authAttempted(false), m_videoLocalId(0), m_controlLocalId(0), m_serverLocalId(0), m_enableVideo(true), m_enableUhid(false), m_videoStage(1), m_videoReadPos(0) {
+
+	AdbClient::AdbClient() : m_socket(INVALID_SOCKET), m_running(false), m_connectPromise(nullptr),
+		m_localIdCounter(1), m_authAttempted(false), m_videoLocalId(0), m_controlLocalId(0), m_serverLocalId(0),
+		m_enableVideo(true), m_enableUhid(false), m_videoStage(1),
+		m_videoReadPos(0), m_videoWritePos(0), m_videoCapacity(1024 * 1024 * 2) // Allocate 2MB
+	{
 		m_recvBuffer.resize(65536 + 24);
-		m_videoBuffer.reserve(1024 * 512);
+		m_videoBufferBytes = std::make_unique<uint8_t[]>(m_videoCapacity);
 	}
 
 	AdbClient::~AdbClient() { Disconnect(); }
@@ -54,7 +59,12 @@ namespace ScrcpyVideoEngine {
 		if (m_socket != INVALID_SOCKET) { shutdown(m_socket, SD_BOTH); closesocket(m_socket); m_socket = INVALID_SOCKET; }
 		if (m_recvThread.joinable()) m_recvThread.join();
 		m_localToRemote.clear(); m_pendingOpens.clear(); m_pendingCloses.clear(); m_shellBuffers.clear();
-		m_videoReadPos = 0; m_videoStage = 1; m_videoBuffer.clear(); m_pendingConfig.clear();
+
+		m_videoReadPos = 0;
+		m_videoWritePos = 0;
+		m_videoStage = 1;
+		m_pendingConfig.clear();
+
 		WSACleanup();
 	}
 
@@ -148,42 +158,84 @@ namespace ScrcpyVideoEngine {
 		}
 		case A_WRTE: {
 			SendPacket(A_OKAY, a0, a1, nullptr, 0);
+
 			if (m_enableVideo && a1 == m_videoLocalId) {
-				m_videoBuffer.insert(m_videoBuffer.end(), payload, payload + dlen);
+				size_t spaceAtEnd = m_videoCapacity - m_videoWritePos;
+
+				if (dlen > spaceAtEnd) {
+					size_t activeDataSize = m_videoWritePos - m_videoReadPos;
+					size_t totalSpace = m_videoCapacity - activeDataSize;
+
+					if (dlen > totalSpace) {
+						if (m_logCallback) m_logCallback("Buffer overflow! Resetting video stream buffer.");
+						m_videoReadPos = 0;
+						m_videoWritePos = 0;
+						m_videoStage = 1;
+						return;
+					}
+
+					if (activeDataSize > 0) {
+						memmove(m_videoBufferBytes.get(), m_videoBufferBytes.get() + m_videoReadPos, activeDataSize);
+					}
+					m_videoReadPos = 0;
+					m_videoWritePos = activeDataSize;
+				}
+
+				memcpy(m_videoBufferBytes.get() + m_videoWritePos, payload, dlen);
+				m_videoWritePos += dlen;
+
 				bool work = true;
 				while (work) {
 					work = false;
-					size_t available = m_videoBuffer.size() - m_videoReadPos;
-					uint8_t* ptr = m_videoBuffer.data() + m_videoReadPos;
-					if (m_videoStage == 1 && available >= 64) { m_videoReadPos += 64; m_videoStage = 2; work = true; }
+					size_t available = m_videoWritePos - m_videoReadPos;
+					uint8_t* ptr = m_videoBufferBytes.get() + m_videoReadPos;
+
+					if (m_videoStage == 1 && available >= 64) {
+						m_videoReadPos += 64;
+						m_videoStage = 2;
+						work = true;
+					}
 					else if (m_videoStage == 2 && available >= 12) {
 						uint32_t w = ReadBE32(ptr + 4), h = ReadBE32(ptr + 8);
 						if (m_resCallback) m_resCallback(w, h);
-						m_videoReadPos += 12; m_videoStage = 3; work = true;
+						m_videoReadPos += 12;
+						m_videoStage = 3;
+						work = true;
 					}
 					else if (m_videoStage == 3 && available >= 12) {
-						uint64_t ptsData = ReadBE64(ptr); uint32_t pSize = ReadBE32(ptr + 8);
+						uint64_t ptsData = ReadBE64(ptr);
+						uint32_t pSize = ReadBE32(ptr + 8);
+
 						if (available >= (12 + pSize)) {
 							bool isConfig = (ptsData & 0x8000000000000000) != 0;
 							int64_t ptsUs = ptsData & 0x3FFFFFFFFFFFFFFF;
 							const uint8_t* packetStart = ptr + 12;
-							if (isConfig) m_pendingConfig.assign(packetStart, packetStart + pSize);
+
+							if (isConfig) {
+								m_pendingConfig.assign(packetStart, packetStart + pSize);
+							}
 							else if (m_videoEngine) {
 								DWORD configSize = (DWORD)m_pendingConfig.size();
 								Microsoft::WRL::ComPtr<IMFMediaBuffer> mediaBuffer;
 								if (SUCCEEDED(MFCreateMemoryBuffer(pSize + configSize, &mediaBuffer))) {
-									BYTE* dest = nullptr; mediaBuffer->Lock(&dest, nullptr, nullptr);
-									if (configSize > 0) { memcpy(dest, m_pendingConfig.data(), configSize); dest += configSize; m_pendingConfig.clear(); }
+									BYTE* dest = nullptr;
+									mediaBuffer->Lock(&dest, nullptr, nullptr);
+									if (configSize > 0) {
+										memcpy(dest, m_pendingConfig.data(), configSize);
+										dest += configSize;
+										m_pendingConfig.clear();
+									}
 									memcpy(dest, packetStart, pSize);
-									mediaBuffer->Unlock(); mediaBuffer->SetCurrentLength(pSize + configSize);
+									mediaBuffer->Unlock();
+									mediaBuffer->SetCurrentLength(pSize + configSize);
 									m_videoEngine->PushFrame(mediaBuffer, ptsUs);
 								}
 							}
-							m_videoReadPos += (12 + pSize); work = true;
+							m_videoReadPos += (12 + pSize);
+							work = true;
 						}
 					}
 				}
-				CompactVideoBuffer();
 			}
 			else if (a1 != m_controlLocalId) {
 				std::lock_guard<std::mutex> lock(m_shellMutex);
@@ -256,14 +308,5 @@ namespace ScrcpyVideoEngine {
 
 		delete cl;
 		return success ? *buffer : "";
-	}
-
-	void AdbClient::CompactVideoBuffer() {
-		const size_t COMPACT_THRESHOLD = 256 * 1024;
-		if (m_videoReadPos > COMPACT_THRESHOLD) {
-			if (m_videoBuffer.size() > m_videoReadPos) m_videoBuffer.erase(m_videoBuffer.begin(), m_videoBuffer.begin() + m_videoReadPos);
-			else m_videoBuffer.clear();
-			m_videoReadPos = 0;
-		}
 	}
 }
