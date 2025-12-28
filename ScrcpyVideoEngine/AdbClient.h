@@ -51,7 +51,6 @@ namespace ScrcpyVideoEngine {
 		void ReceiveLoop();
 		void HandlePacket(uint32_t cmd, uint32_t arg0, uint32_t arg1, uint32_t dlen, const uint8_t* payload);
 		bool RecvExact(void* buf, size_t len);
-		void CompactVideoBuffer();
 
 		SOCKET m_socket;
 		std::atomic<bool> m_running;
@@ -75,7 +74,10 @@ namespace ScrcpyVideoEngine {
 		bool m_enableUhid;
 
 		std::vector<uint8_t> m_recvBuffer;
-		std::vector<uint8_t> m_videoBuffer;
+
+		std::unique_ptr<uint8_t[]> m_videoBufferBytes;
+		size_t m_videoCapacity;
+		size_t m_videoWritePos;
 		size_t m_videoReadPos;
 		int m_videoStage;
 		std::vector<uint8_t> m_pendingConfig;

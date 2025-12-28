@@ -38,6 +38,8 @@ namespace ScrcpyVideoEngine {
 		if (!InitDX11() || !InitDecoder(width, height)) return;
 		if (m_panelNative) CreateSwapChain(width, height);
 
+		UpdateVideoProcessorRects();
+
 		m_isInitialized = true;
 		m_running = true;
 		m_decoderThread = std::thread(&VideoEngine::DecoderLoop, this);
@@ -57,6 +59,7 @@ namespace ScrcpyVideoEngine {
 			m_decoder.Reset();
 			m_videoProcessor.Reset();
 			m_videoProcessorEnum.Reset();
+			m_inputViewCache.clear();
 		};
 
 		if (m_dispatcher && !m_dispatcher->HasThreadAccess) {
@@ -74,7 +77,7 @@ namespace ScrcpyVideoEngine {
 	}
 
 	void VideoEngine::PushFrame(ComPtr<IMFMediaBuffer> buf, int64_t pts) {
-		if (!buf || !m_running) return;
+		if (!buf) return;
 		{
 			std::lock_guard<std::mutex> lock(m_queueMutex);
 			m_packetQueue.push({ buf, pts });
@@ -151,25 +154,40 @@ namespace ScrcpyVideoEngine {
 		}
 	}
 
+	void VideoEngine::UpdateVideoProcessorRects() {
+		if (!m_videoContext || !m_videoProcessor) return;
+		RECT sourceRect = { 0, 0, (LONG)m_width, (LONG)m_height };
+		m_videoContext->VideoProcessorSetStreamSourceRect(m_videoProcessor.Get(), 0, TRUE, &sourceRect);
+		m_videoContext->VideoProcessorSetStreamDestRect(m_videoProcessor.Get(), 0, FALSE, nullptr);
+	}
+
 	void VideoEngine::RenderFrame(ID3D11Texture2D* decoderTex, UINT subIndex) {
 		if (!m_swapChain || !m_videoProcessor || !m_videoContext) return;
+
 		if (!m_cachedOutputView) {
 			if (FAILED(m_swapChain->GetBuffer(0, IID_PPV_ARGS(&m_cachedBackBuffer)))) return;
 			D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = { D3D11_VPOV_DIMENSION_TEXTURE2D };
 			if (FAILED(m_videoDevice->CreateVideoProcessorOutputView(m_cachedBackBuffer.Get(), m_videoProcessorEnum.Get(), &outputViewDesc, &m_cachedOutputView))) { m_cachedBackBuffer.Reset(); return; }
 		}
-		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc = { 0 };
-		inputViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-		inputViewDesc.Texture2D.ArraySlice = subIndex;
+
 		ComPtr<ID3D11VideoProcessorInputView> inputView;
-		if (FAILED(m_videoDevice->CreateVideoProcessorInputView(decoderTex, m_videoProcessorEnum.Get(), &inputViewDesc, &inputView))) return;
+		auto it = m_inputViewCache.find(decoderTex);
+		if (it != m_inputViewCache.end()) {
+			inputView = it->second;
+		}
+		else {
+			D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc = { 0 };
+			inputViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+			inputViewDesc.Texture2D.ArraySlice = subIndex;
+
+			if (FAILED(m_videoDevice->CreateVideoProcessorInputView(decoderTex, m_videoProcessorEnum.Get(), &inputViewDesc, &inputView))) return;
+			m_inputViewCache[decoderTex] = inputView;
+		}
 
 		D3D11_VIDEO_PROCESSOR_STREAM stream = { 0 };
 		stream.Enable = TRUE;
 		stream.pInputSurface = inputView.Get();
-		RECT sourceRect = { 0, 0, (LONG)m_width, (LONG)m_height };
-		m_videoContext->VideoProcessorSetStreamSourceRect(m_videoProcessor.Get(), 0, TRUE, &sourceRect);
-		m_videoContext->VideoProcessorSetStreamDestRect(m_videoProcessor.Get(), 0, FALSE, nullptr);
+
 		if (SUCCEEDED(m_videoContext->VideoProcessorBlt(m_videoProcessor.Get(), m_cachedOutputView.Get(), 0, 1, &stream))) {
 			m_swapChain->Present(0, DXGI_PRESENT_ALLOW_TEARING);
 		}
@@ -253,10 +271,15 @@ namespace ScrcpyVideoEngine {
 
 	void VideoEngine::ApplyResolutionChange(uint32_t width, uint32_t height) {
 		if (m_width == width && m_height == height) return;
-		m_cachedOutputView.Reset(); m_cachedBackBuffer.Reset();
+
+		m_inputViewCache.clear();
+		m_cachedOutputView.Reset();
+		m_cachedBackBuffer.Reset();
+
 		m_width = width; m_height = height;
 		if (m_d3dContext) { m_d3dContext->OMSetRenderTargets(0, nullptr, nullptr); m_d3dContext->ClearState(); m_d3dContext->Flush(); }
 		if (m_swapChain) m_swapChain->ResizeBuffers(2, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+
 		if (m_videoDevice) {
 			m_videoProcessorEnum.Reset(); m_videoProcessor.Reset();
 			D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc = {};
@@ -266,6 +289,8 @@ namespace ScrcpyVideoEngine {
 			desc.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
 			m_videoDevice->CreateVideoProcessorEnumerator(&desc, &m_videoProcessorEnum);
 			if (m_videoProcessorEnum) m_videoDevice->CreateVideoProcessor(m_videoProcessorEnum.Get(), 0, &m_videoProcessor);
+
+			UpdateVideoProcessorRects();
 		}
 	}
 }

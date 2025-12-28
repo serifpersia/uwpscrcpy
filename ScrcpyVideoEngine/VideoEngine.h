@@ -25,6 +25,7 @@ namespace ScrcpyVideoEngine {
 		void DecoderLoop();
 		void ProcessDecodedOutput();
 		void RenderFrame(ID3D11Texture2D* decoderTex, UINT subIndex);
+		void UpdateVideoProcessorRects(); // New helper function
 
 		std::atomic<bool> m_running;
 		std::atomic<bool> m_isInitialized;
@@ -52,6 +53,11 @@ namespace ScrcpyVideoEngine {
 		Microsoft::WRL::ComPtr<ID3D11VideoProcessor> m_videoProcessor;
 		Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> m_cachedOutputView;
 		Microsoft::WRL::ComPtr<ID3D11Texture2D> m_cachedBackBuffer;
+
+		// --- PERFORMANCE FIX #2: Caching Variables ---
+		// Map to cache InputViews for decoder textures so we don't recreate them every frame
+		std::map<ID3D11Texture2D*, Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView>> m_inputViewCache;
+		// ---------------------------------------------
 
 		std::function<void(uint32_t, uint32_t)> m_resCallback;
 	};
