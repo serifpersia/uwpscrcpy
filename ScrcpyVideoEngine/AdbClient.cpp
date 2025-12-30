@@ -16,7 +16,7 @@ namespace ScrcpyVideoEngine {
 	AdbClient::AdbClient() : m_socket(INVALID_SOCKET), m_running(false), m_connectPromise(nullptr),
 		m_localIdCounter(1), m_authAttempted(false), m_videoLocalId(0), m_controlLocalId(0), m_serverLocalId(0),
 		m_enableVideo(true), m_enableUhid(false), m_videoStage(1),
-		m_videoReadPos(0), m_videoWritePos(0), m_videoCapacity(1024 * 1024 * 2) // Allocate 2MB
+		m_videoReadPos(0), m_videoWritePos(0), m_videoCapacity(1024 * 1024 * 4)
 	{
 		m_recvBuffer.resize(65536 + 24);
 		m_videoBufferBytes = std::make_unique<uint8_t[]>(m_videoCapacity);
@@ -27,20 +27,46 @@ namespace ScrcpyVideoEngine {
 	bool AdbClient::Connect(const std::string& ip, int port) {
 		Disconnect();
 		m_authAttempted = false;
-		WSADATA wsaData; if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
+
+		WSADATA wsaData;
+		if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+			return false;
+		}
+
 		m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-		if (m_socket == INVALID_SOCKET) return false;
-		int rcvBufSize = 512 * 1024;
-		setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF, (char*)&rcvBufSize, sizeof(rcvBufSize));
-		sockaddr_in addr; addr.sin_family = AF_INET; addr.sin_addr.s_addr = inet_addr(ip.c_str()); addr.sin_port = htons(port);
-		if (connect(m_socket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) { closesocket(m_socket); m_socket = INVALID_SOCKET; WSACleanup(); return false; }
+		if (m_socket == INVALID_SOCKET) {
+			return false;
+		}
+
+		int bufSize = 2 * 1024 * 1024;
+		setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF, (char*)&bufSize, sizeof(bufSize));
+		setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF, (char*)&bufSize, sizeof(bufSize));
+
+		sockaddr_in addr;
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = inet_addr(ip.c_str());
+		addr.sin_port = htons(port);
+
+		if (connect(m_socket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+			closesocket(m_socket);
+			m_socket = INVALID_SOCKET;
+			WSACleanup();
+			return false;
+		}
+
 		m_running = true;
 
-		if (m_connectPromise) { delete m_connectPromise; m_connectPromise = nullptr; }
+		if (m_connectPromise) {
+			delete m_connectPromise;
+			m_connectPromise = nullptr;
+		}
 		m_connectPromise = new std::promise<bool>();
 
 		auto fut = m_connectPromise->get_future();
 		m_recvThread = std::thread(&AdbClient::ReceiveLoop, this);
+
+		SetThreadPriority(m_recvThread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+
 		std::string host = "host::\0";
 		SendPacket(A_CNXN, 0x01000001, 1024 * 1024, host.data(), (uint32_t)host.size());
 
@@ -50,7 +76,10 @@ namespace ScrcpyVideoEngine {
 
 		Disconnect();
 
-		if (m_connectPromise) { delete m_connectPromise; m_connectPromise = nullptr; }
+		if (m_connectPromise) {
+			delete m_connectPromise;
+			m_connectPromise = nullptr;
+		}
 		return false;
 	}
 

@@ -43,6 +43,7 @@ namespace ScrcpyVideoEngine {
 		m_isInitialized = true;
 		m_running = true;
 		m_decoderThread = std::thread(&VideoEngine::DecoderLoop, this);
+		SetThreadPriority(m_decoderThread.native_handle(), THREAD_PRIORITY_HIGHEST);
 	}
 
 	void VideoEngine::Shutdown() {
@@ -201,8 +202,8 @@ namespace ScrcpyVideoEngine {
 			if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device, &featureLevel, &context))) return false;
 			m_d3dDevice = device; m_d3dContext = context;
 			m_d3dDevice.As(&m_videoDevice); m_d3dContext.As(&m_videoContext);
-			ComPtr<ID3D10Multithread> multithread;
-			if (SUCCEEDED(m_d3dDevice.As(&multithread))) multithread->SetMultithreadProtected(TRUE);
+
+
 			MFCreateDXGIDeviceManager(&m_resetToken, &m_dxgiManager);
 			m_dxgiManager->ResetDevice(m_d3dDevice.Get(), m_resetToken);
 		}
@@ -251,13 +252,18 @@ namespace ScrcpyVideoEngine {
 		DXGI_SWAP_CHAIN_DESC1 desc = { 0 };
 		desc.Width = width; desc.Height = height; desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 		desc.SampleDesc.Count = 1; desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; desc.BufferCount = 2;
-		desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; desc.Scaling = DXGI_SCALING_STRETCH;
+		desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; desc.Scaling = DXGI_SCALING_STRETCH;
 		desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 		ComPtr<IDXGIDevice> dxgiDevice; m_d3dDevice.As(&dxgiDevice);
 		ComPtr<IDXGIAdapter> adapter; dxgiDevice->GetAdapter(&adapter);
 		ComPtr<IDXGIFactory2> factory; adapter->GetParent(IID_PPV_ARGS(&factory));
 		m_swapChain.Reset();
 		factory->CreateSwapChainForComposition(m_d3dDevice.Get(), &desc, nullptr, &m_swapChain);
+
+		ComPtr<IDXGISwapChain2> spSwapChain2;
+		if (SUCCEEDED(m_swapChain.As(&spSwapChain2))) {
+			spSwapChain2->SetMaximumFrameLatency(1);
+		}
 
 		if (m_dispatcher && !m_dispatcher->HasThreadAccess) {
 			m_dispatcher->RunAsync(CoreDispatcherPriority::High, ref new DispatchedHandler([this]() {
